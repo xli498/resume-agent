@@ -1,0 +1,30 @@
+# Runtime and local artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Generated and potentially sensitive outputs
+output/
+outputs/
+*.log
+
+# Local/private inputs (use examples/ for public fixtures)
+input/resume.txt
+input/jd.txt
+input/photo.jpg
+input/*
+!input/.gitkeep
+web_sessions/
+.env
+.env.*
+!.env.example
+
+# OS/editor files
+.DS_Store
+.vscode/
+.idea/

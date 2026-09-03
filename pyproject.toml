@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resume-agent"
+version = "0.1.0"
+description = "Evidence-aware resume and job-description matching agent"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+keywords = ["resume", "job-description", "career", "agent"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = ["Pillow>=10,<12", "reportlab>=4,<5", "PyMuPDF>=1.24,<2"]
+
+[project.urls]
+Homepage = "https://github.com/xli498/resume-agent"
+Repository = "https://github.com/xli498/resume-agent"
+Issues = "https://github.com/xli498/resume-agent/issues"
+
+[project.optional-dependencies]
+langgraph = ["langgraph>=0.6,<1.0"]
+
+[tool.setuptools]
+py-modules = ["main", "workflow", "llm_client", "delivery", "web_app"]

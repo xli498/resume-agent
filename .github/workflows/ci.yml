@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality-gates:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install system font
+        run: sudo apt-get update && sudo apt-get install -y fonts-wqy-zenhei
+      - name: Install project
+        run: python -m pip install --upgrade pip && python -m pip install '.[langgraph]'
+      - name: Compile
+        run: python -m py_compile main.py workflow.py llm_client.py delivery.py web_app.py test_resume_agent.py test_web_app.py
+      - name: Unit tests
+        run: python -m unittest -v
+      - name: Python and LangGraph end-to-end
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          trap 'rm -rf "$root"' EXIT
+          for workflow in python langgraph; do
+            python main.py \
+              --resume examples/resume.txt \
+              --jd examples/jd.txt \
+              --mock-llm \
+              --export-package \
+              --workflow "$workflow" \
+              --output-dir "$root/$workflow"
+          done
+          python - "$root" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          for workflow in ("python", "langgraph"):
+              output = root / workflow
+              manifest = json.loads((output / "run-manifest.json").read_text(encoding="utf-8"))
+              pointer_path = output / "current-release.json"
+              assert pointer_path.is_file() and not pointer_path.is_symlink()
+              pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+              release_path = Path(pointer["path"])
+              assert not release_path.is_absolute()
+              assert release_path.parts[:1] == ("releases",) and len(release_path.parts) == 2
+              release = output / release_path
+              assert manifest["status"] == "success"
+              assert manifest["qa"]["status"] == "pass"
+              assert manifest["qa"]["release"] == pointer
+              assert (output / "final-resume.md").read_bytes() == (output / "final-resume-ats.md").read_bytes()
+              assert (output.stat().st_mode & 0o777) == 0o700
+              assert all((path.stat().st_mode & 0o777) == 0o600 for path in output.iterdir() if path.is_file())
+              assert release.is_dir() and not release.is_symlink()
+              assert (release.stat().st_mode & 0o777) == 0o700
+              for name in ("final-resume-ats.md", "final-resume.pdf", "final-resume.png"):
+                  assert (release / name).read_bytes() == (output / name).read_bytes()
+                  assert (release / name).stat().st_mode & 0o777 == 0o600
+              release_manifest = release / "release-manifest.json"
+              assert pointer["manifest_sha256"] == hashlib.sha256(release_manifest.read_bytes()).hexdigest()
+              checksum = (output / "run-manifest.sha256").read_text(encoding="utf-8").split()[0]
+              assert checksum == hashlib.sha256((output / "run-manifest.json").read_bytes()).hexdigest()
+              assert not (output / "prompt.txt").exists()
+          PY
+      - name: Whitespace errors
+        run: git diff --check
