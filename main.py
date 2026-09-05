@@ -1649,7 +1649,7 @@ def _print_error(message: str, fallback: str) -> None:
 
 
 def _configure_console_streams() -> None:
-    """Use UTF-8 for real console streams while tolerating test doubles."""
+    """Make real console streams tolerate Unicode while preserving their encoding."""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
