@@ -52,6 +52,23 @@ class ResumeAgentTests(unittest.TestCase):
         else:
             self.assertTrue(any("/usr/share/fonts" in path for path in candidates))
 
+    @unittest.skipUnless(os.name != "nt", "Linux font fallback contract")
+    def test_pdf_and_image_font_selection_have_separate_linux_fallbacks(self):
+        from types import SimpleNamespace
+        import delivery
+
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory) / "cjk.ttf"
+            candidate.write_bytes(b"font")
+            with patch.object(delivery, "_font_candidates", return_value=(str(candidate),)), \
+                    patch.object(delivery.shutil, "which", return_value="fc-match"), \
+                    patch.object(delivery.subprocess, "run", return_value=SimpleNamespace(stdout="/missing/fallback.ttf")):
+                self.assertEqual(delivery._pdf_font_path(), str(candidate))
+
+            with patch.object(delivery.shutil, "which", return_value="fc-match"), \
+                    patch.object(delivery.subprocess, "run", return_value=SimpleNamespace(stdout=str(candidate))):
+                self.assertEqual(delivery._image_font_path(), str(candidate))
+
     def test_fsync_directory_is_best_effort_on_windows(self):
         from delivery import _fsync_directory
         with tempfile.TemporaryDirectory() as directory:

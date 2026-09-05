@@ -12,7 +12,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from llm_client import call_llm
-from delivery import _font_path
+from delivery import _image_font_path
 
 
 # 读取 UTF-8 文本文件，并返回文件内容。
@@ -1197,8 +1197,8 @@ def render_resume_image(
     if not photo_path.is_file():
         raise FileNotFoundError(f"找不到照片：{photo_path}")
     from PIL import Image, ImageDraw, ImageFont, ImageOps
-    font_path = _font_path()
-    bold_path = _font_path(bold=True)
+    font_path = _image_font_path()
+    bold_path = _image_font_path(bold=True)
     W, margin, header_h = 1600, 105, 390
     if template == "ats":
         navy, blue, ink, muted, line, white = "#202020", "#202020", "#202020", "#555555", "#CFCFCF", "#FFFFFF"

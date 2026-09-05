@@ -175,24 +175,39 @@ def _font_candidates(*, bold: bool = False) -> tuple[str, ...]:
     return tuple(candidates)
 
 
-def _font_path(*, bold: bool = False) -> str:
+def _pdf_font_path(*, bold: bool = False) -> str:
     candidates = _font_candidates(bold=bold)
-    # Preserve the established Linux font selection and its measured layout;
-    # Windows has no fc-match and uses the explicit system-font candidates.
-    if os.name != "nt" and shutil.which("fc-match"):
-        family = "HarmonyHeiTi:style=Bold" if bold else "HarmonyHeiTi"
-        matched = subprocess.run(["fc-match", "-f", "%{file}", family], capture_output=True, text=True, check=False).stdout.strip()
-        if matched and Path(matched).is_file():
-            return matched
+    # PDF text extraction depends on a real CJK font. Prefer explicit known
+    # candidates so an unavailable family name cannot resolve to DejaVu.
     for candidate in candidates:
         if Path(candidate).is_file():
             return candidate
-    if os.name == "nt" and shutil.which("fc-match"):
+    if shutil.which("fc-match"):
         family = "HarmonyHeiTi:style=Bold" if bold else "HarmonyHeiTi"
         matched = subprocess.run(["fc-match", "-f", "%{file}", family], capture_output=True, text=True, check=False).stdout.strip()
         if matched and Path(matched).is_file():
             return matched
     raise RuntimeError("未找到可用于 PDF 的中文字体")
+
+
+def _image_font_path(*, bold: bool = False) -> str:
+    """Select the established image font while retaining a portable fallback."""
+    if os.name != "nt" and shutil.which("fc-match"):
+        family = "HarmonyHeiTi:style=Bold" if bold else "HarmonyHeiTi"
+        matched = subprocess.run(
+            ["fc-match", "-f", "%{file}", family],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        if matched and Path(matched).is_file():
+            return matched
+    return _pdf_font_path(bold=bold)
+
+
+def _font_path(*, bold: bool = False) -> str:
+    """Backward-compatible alias for PDF font selection."""
+    return _pdf_font_path(bold=bold)
 
 
 def _plain_lines(markdown: str) -> list[tuple[str, str]]:
@@ -270,8 +285,8 @@ def export_single_page_pdf(
     font_name = "ResumeAgentCJK"
     bold_name = "ResumeAgentCJKBold"
     if font_name not in pdfmetrics.getRegisteredFontNames():
-        pdfmetrics.registerFont(TTFont(font_name, _font_path()))
-    bold_path = _font_path(bold=True)
+        pdfmetrics.registerFont(TTFont(font_name, _pdf_font_path()))
+    bold_path = _pdf_font_path(bold=True)
     if bold_name not in pdfmetrics.getRegisteredFontNames():
         pdfmetrics.registerFont(TTFont(bold_name, bold_path))
     width, height = A4
