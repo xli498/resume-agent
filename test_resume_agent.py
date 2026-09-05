@@ -1253,6 +1253,29 @@ class ResumeAgentTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         self.assertIn(b"Run failed: ValueError", stream.getvalue())
 
+    def test_cli_export_survives_ascii_console_encoding(self):
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            environment = os.environ.copy()
+            environment["PYTHONIOENCODING"] = "ascii"
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "main.py",
+                    "--resume", "examples/resume.txt",
+                    "--jd", "examples/jd.txt",
+                    "--mock-llm", "--export-package",
+                    "--workflow", "python", "--output-dir", str(output),
+                ],
+                cwd=Path(__file__).parent,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertTrue((output / "final-resume.pdf").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

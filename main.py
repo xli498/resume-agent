@@ -1648,10 +1648,26 @@ def _print_error(message: str, fallback: str) -> None:
         print(fallback, file=sys.stderr)
 
 
+def _configure_console_streams() -> None:
+    """Use UTF-8 for real console streams while tolerating test doubles."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            # Keep the platform encoding for parent-process compatibility;
+            # backslash replacement prevents unsupported Unicode from aborting
+            # a successful CLI run on legacy Windows consoles.
+            reconfigure(errors="backslashreplace")
+        except (AttributeError, OSError, ValueError):
+            continue
+
+
 def main() -> None:
     """统一 CLI 异常边界：已知失败保留退出码，未知失败不泄露堆栈或敏感正文。"""
     previous_umask = os.umask(0o077)
     try:
+        _configure_console_streams()
         _run_cli()
     except SystemExit:
         raise
