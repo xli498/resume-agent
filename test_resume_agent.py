@@ -1,5 +1,6 @@
 import json
 import os
+import io
 import subprocess
 import sys
 import unittest
@@ -1234,6 +1235,23 @@ class ResumeAgentTests(unittest.TestCase):
             self.assertEqual(process.returncode, 2)
             self.assertIn("UTF-8", process.stderr)
             self.assertNotIn("UTF-8", process.stdout)
+
+    def test_cli_unknown_error_survives_ascii_stderr(self):
+        class AsciiStderr(io.BytesIO):
+            encoding = "ascii"
+
+            def write(self, value):
+                if isinstance(value, str):
+                    value.encode("ascii")
+                    value = value.encode("ascii")
+                return super().write(value)
+
+        stream = AsciiStderr()
+        with patch.object(main_module, "_run_cli", side_effect=ValueError("internal")), patch.object(sys, "stderr", stream):
+            with self.assertRaises(SystemExit) as raised:
+                main_module.main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn(b"Run failed: ValueError", stream.getvalue())
 
 
 if __name__ == "__main__":
