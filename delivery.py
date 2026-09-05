@@ -177,10 +177,17 @@ def _font_candidates(*, bold: bool = False) -> tuple[str, ...]:
 
 def _font_path(*, bold: bool = False) -> str:
     candidates = _font_candidates(bold=bold)
+    # Preserve the established Linux font selection and its measured layout;
+    # Windows has no fc-match and uses the explicit system-font candidates.
+    if os.name != "nt" and shutil.which("fc-match"):
+        family = "HarmonyHeiTi:style=Bold" if bold else "HarmonyHeiTi"
+        matched = subprocess.run(["fc-match", "-f", "%{file}", family], capture_output=True, text=True, check=False).stdout.strip()
+        if matched and Path(matched).is_file():
+            return matched
     for candidate in candidates:
         if Path(candidate).is_file():
             return candidate
-    if shutil.which("fc-match"):
+    if os.name == "nt" and shutil.which("fc-match"):
         family = "HarmonyHeiTi:style=Bold" if bold else "HarmonyHeiTi"
         matched = subprocess.run(["fc-match", "-f", "%{file}", family], capture_output=True, text=True, check=False).stdout.strip()
         if matched and Path(matched).is_file():
