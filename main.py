@@ -1257,6 +1257,10 @@ def render_resume_image(
         raise ValueError(f"照片与文字区域重叠：{len(collisions)}处")
 
     def wrap(text, font, width):
+        def measured_width(value):
+            bbox = draw.textbbox((0, 0), value, font=font)
+            return bbox[2] - bbox[0]
+
         rows, current, token = [], "", ""
         parts=[]
         for ch in text:
@@ -1268,17 +1272,17 @@ def render_resume_image(
         if token: parts.append(token)
         for part in parts:
             # 超长英文/URL token 不能整段塞入，否则会越过右边界；按字符拆分。
-            if draw.textlength(part, font=font) > width:
+            if measured_width(part) > width:
                 if current:
                     rows.append(current); current = ""
                 chunk = ""
                 for char in part:
-                    if draw.textlength(chunk + char, font=font) > width and chunk:
+                    if measured_width(chunk + char) > width and chunk:
                         rows.append(chunk); chunk = char
                     else:
                         chunk += char
                 current = chunk
-            elif draw.textlength(current + part, font=font) > width and current:
+            elif measured_width(current + part) > width and current:
                 rows.append(current); current = part
             else:
                 current += part
