@@ -12,6 +12,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from llm_client import call_llm
+from delivery import _image_font_path
 
 
 # 读取 UTF-8 文本文件，并返回文件内容。
@@ -168,7 +169,9 @@ def write_private_text(path: Path, content: str) -> None:
     """简历产物默认仅当前用户可读写。"""
     if path.is_symlink():
         raise ValueError("拒绝写入符号链接产物")
-    path.write_text(content, encoding="utf-8")
+    # Write bytes explicitly so generated artifacts retain LF/UTF-8 identity
+    # on Windows instead of receiving implicit CRLF translation.
+    path.write_bytes(content.encode("utf-8"))
     path.chmod(0o600)
 
 
@@ -1194,10 +1197,8 @@ def render_resume_image(
     if not photo_path.is_file():
         raise FileNotFoundError(f"找不到照片：{photo_path}")
     from PIL import Image, ImageDraw, ImageFont, ImageOps
-    import subprocess
-
-    font_path = subprocess.check_output(["fc-match", "-f", "%{file}", "HarmonyHeiTi"], text=True).strip()
-    bold_path = subprocess.check_output(["fc-match", "-f", "%{file}", "HarmonyHeiTi:style=Bold"], text=True).strip()
+    font_path = _image_font_path()
+    bold_path = _image_font_path(bold=True)
     W, margin, header_h = 1600, 105, 390
     if template == "ats":
         navy, blue, ink, muted, line, white = "#202020", "#202020", "#202020", "#555555", "#CFCFCF", "#FFFFFF"
@@ -1256,6 +1257,10 @@ def render_resume_image(
         raise ValueError(f"照片与文字区域重叠：{len(collisions)}处")
 
     def wrap(text, font, width):
+        def measured_width(value):
+            bbox = draw.textbbox((0, 0), value, font=font)
+            return bbox[2] - bbox[0]
+
         rows, current, token = [], "", ""
         parts=[]
         for ch in text:
@@ -1267,17 +1272,17 @@ def render_resume_image(
         if token: parts.append(token)
         for part in parts:
             # 超长英文/URL token 不能整段塞入，否则会越过右边界；按字符拆分。
-            if draw.textlength(part, font=font) > width:
+            if measured_width(part) > width:
                 if current:
                     rows.append(current); current = ""
                 chunk = ""
                 for char in part:
-                    if draw.textlength(chunk + char, font=font) > width and chunk:
+                    if measured_width(chunk + char) > width and chunk:
                         rows.append(chunk); chunk = char
                     else:
                         chunk += char
                 current = chunk
-            elif draw.textlength(current + part, font=font) > width and current:
+            elif measured_width(current + part) > width and current:
                 rows.append(current); current = part
             else:
                 current += part
@@ -1285,7 +1290,9 @@ def render_resume_image(
         return rows
 
     def write_wrapped(text, y, font=small, leading=36):
-        for row in wrap(text, font, W - 2 * margin):
+        # Leave a small deterministic cushion for font-side-bearing and
+        # rounding differences across Pillow/font implementations.
+        for row in wrap(text, font, W - 2 * margin - 8):
             bbox = draw.textbbox((margin, y), row, font=font)
             if intersects(bbox, photo_rect):
                 raise ValueError("照片与正文文字区域重叠")
@@ -1403,10 +1410,10 @@ def _run_cli() -> None:
         resume_text = read_text_file(resume_path)
         jd_text = read_text_file(jd_path)
     except FileNotFoundError as error:
-        print(f"读取失败：找不到文件 {error.filename}", file=sys.stderr)
+        _print_error(f"读取失败：找不到文件 {error.filename}", "Read failed: file not found")
         raise SystemExit(2)
     except UnicodeDecodeError:
-        print("读取失败：输入文件不是有效的 UTF-8 文本", file=sys.stderr)
+        _print_error("读取失败：输入文件不是有效的 UTF-8 文本", "Read failed: input is not valid UTF-8")
         raise SystemExit(2)
 
     analysis = build_analysis(resume_text, jd_text)
@@ -1431,7 +1438,7 @@ def _run_cli() -> None:
                     resume_text, jd_text, job_title=args.job_title
                 )["final_resume"]
             except (RuntimeError, ValueError) as error:
-                print(f"LangGraph工作流不可用：{error}", file=sys.stderr)
+                _print_error(f"LangGraph工作流不可用：{error}", "LangGraph workflow unavailable")
                 raise SystemExit(2)
         else:
             from workflow import run_python_workflow
@@ -1439,7 +1446,7 @@ def _run_cli() -> None:
         violations = validate_resume_draft(final_resume)
         violations.extend(validate_resume_evidence(resume_text, final_resume))
         if violations:
-            print("最终简历触发真实性门禁：" + "、".join(violations), file=sys.stderr)
+            _print_error("最终简历触发真实性门禁：" + "、".join(violations), "Resume failed truth validation")
             raise SystemExit(2)
         if args.render_image:
             photo_path = args.photo or (project_dir / "input" / "photo.jpg")
@@ -1448,7 +1455,7 @@ def _run_cli() -> None:
             try:
                 render_resume_image(final_resume, photo_path, output_dir / "final-resume-with-photo.png", args.job_title, args.template)
             except (FileNotFoundError, OSError, subprocess.SubprocessError, ValueError) as error:
-                print(f"图片生成失败：{error}", file=sys.stderr)
+                _print_error(f"图片生成失败：{error}", "Image generation failed")
                 raise SystemExit(2)
 
     if args.mock_llm:
@@ -1469,12 +1476,12 @@ def _run_cli() -> None:
             else:
                 final_resume = build_final_resume(resume_text, parsed_result, jd_text, job_title=args.job_title)
         except ValueError as error:
-            print(f"最终简历生成失败：{error}", file=sys.stderr)
+            _print_error(f"最终简历生成失败：{error}", "Resume generation failed")
             raise SystemExit(2)
         violations = validate_resume_draft(final_resume)
         violations.extend(validate_resume_evidence(resume_text, final_resume))
         if violations:
-            print("最终简历触发真实性门禁：" + "、".join(violations), file=sys.stderr)
+            _print_error("最终简历触发真实性门禁：" + "、".join(violations), "Resume failed truth validation")
             raise SystemExit(2)
         write_private_text(
             output_dir / "llm-alignment-report.md",
@@ -1491,14 +1498,14 @@ def _run_cli() -> None:
             try:
                 render_resume_image(final_resume, photo_path, output_dir / "final-resume-with-photo.png", args.job_title, args.template)
             except (FileNotFoundError, OSError, subprocess.SubprocessError, ValueError) as error:
-                print(f"图片生成失败：{error}", file=sys.stderr)
+                _print_error(f"图片生成失败：{error}", "Image generation failed")
                 raise SystemExit(2)
     elif args.call_llm:
         try:
             raw_result = call_llm(build_llm_prompt(resume_text, jd_text, analysis))
             parsed_result = parse_llm_json(raw_result)
         except (RuntimeError, ValueError) as error:
-            print(f"LLM调用或解析失败：{error}", file=sys.stderr)
+            _print_error(f"LLM调用或解析失败：{error}", "LLM call or parsing failed")
             raise SystemExit(2)
         write_private_text(
             output_dir / "llm-analysis.json",
@@ -1507,7 +1514,7 @@ def _run_cli() -> None:
         try:
             draft = build_targeted_resume_draft(resume_text, parsed_result)
         except ValueError as error:
-            print(f"定向简历生成失败：{error}", file=sys.stderr)
+            _print_error(f"定向简历生成失败：{error}", "Targeted resume generation failed")
             raise SystemExit(2)
         write_private_text(output_dir / "targeted-resume-draft.md", draft)
         try:
@@ -1519,12 +1526,12 @@ def _run_cli() -> None:
             else:
                 final_resume = build_final_resume(resume_text, parsed_result, jd_text, job_title=args.job_title)
         except ValueError as error:
-            print(f"最终简历生成失败：{error}", file=sys.stderr)
+            _print_error(f"最终简历生成失败：{error}", "Resume generation failed")
             raise SystemExit(2)
         violations = validate_resume_draft(final_resume)
         violations.extend(validate_resume_evidence(resume_text, final_resume))
         if violations:
-            print("最终简历触发真实性门禁：" + "、".join(violations), file=sys.stderr)
+            _print_error("最终简历触发真实性门禁：" + "、".join(violations), "Resume failed truth validation")
             raise SystemExit(2)
         write_private_text(
             output_dir / "llm-alignment-report.md",
@@ -1541,13 +1548,13 @@ def _run_cli() -> None:
             try:
                 render_resume_image(final_resume, photo_path, output_dir / "final-resume-with-photo.png", args.job_title, args.template)
             except (FileNotFoundError, OSError, subprocess.SubprocessError, ValueError) as error:
-                print(f"图片生成失败：{error}", file=sys.stderr)
+                _print_error(f"图片生成失败：{error}", "Image generation failed")
                 raise SystemExit(2)
 
     qa_result = None
     if args.export_package:
         if final_resume is None:
-            print("交付包生成失败：没有可用的最终简历", file=sys.stderr)
+            _print_error("交付包生成失败：没有可用的最终简历", "Delivery package failed: no resume")
             raise SystemExit(2)
         try:
             from delivery import export_delivery_package
@@ -1560,7 +1567,7 @@ def _run_cli() -> None:
                 photo_path=photo_path if photo_path.is_file() else None,
             )
         except (ImportError, OSError, RuntimeError, ValueError) as error:
-            print(f"交付包生成失败：{error}", file=sys.stderr)
+            _print_error(f"交付包生成失败：{error}", "Delivery package generation failed")
             raise SystemExit(2)
         write_private_text(
             output_dir / "qa-report.json",
@@ -1569,7 +1576,7 @@ def _run_cli() -> None:
 
     # 正式 Markdown 只在真实性门禁及可选交付 QA 全部通过后发布。
     if final_resume is None:
-        print("最终简历生成失败：没有可用的最终简历", file=sys.stderr)
+        _print_error("最终简历生成失败：没有可用的最终简历", "Resume generation failed: no resume")
         raise SystemExit(2)
     write_private_text(output_dir / "final-resume.md", final_resume)
     write_private_text(
@@ -1633,15 +1640,39 @@ def _run_cli() -> None:
         print(f"ATS Markdown：{output_dir / 'final-resume-ats.md'}")
 
 
+def _print_error(message: str, fallback: str) -> None:
+    """Keep CLI diagnostics usable when stderr is a legacy non-UTF-8 stream."""
+    try:
+        print(message, file=sys.stderr)
+    except UnicodeEncodeError:
+        print(fallback, file=sys.stderr)
+
+
+def _configure_console_streams() -> None:
+    """Make real console streams tolerate Unicode while preserving their encoding."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            # Keep the platform encoding for parent-process compatibility;
+            # backslash replacement prevents unsupported Unicode from aborting
+            # a successful CLI run on legacy Windows consoles.
+            reconfigure(errors="backslashreplace")
+        except (AttributeError, OSError, ValueError):
+            continue
+
+
 def main() -> None:
     """统一 CLI 异常边界：已知失败保留退出码，未知失败不泄露堆栈或敏感正文。"""
     previous_umask = os.umask(0o077)
     try:
+        _configure_console_streams()
         _run_cli()
     except SystemExit:
         raise
     except Exception as error:
-        print(f"运行失败：{type(error).__name__}", file=sys.stderr)
+        _print_error(f"运行失败：{type(error).__name__}", f"Run failed: {type(error).__name__}")
         raise SystemExit(2) from None
     finally:
         os.umask(previous_umask)

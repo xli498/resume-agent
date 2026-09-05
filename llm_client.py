@@ -21,7 +21,10 @@ def _write_log(message: str) -> None:
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(log_path, flags, 0o600)
-    os.fchmod(descriptor, 0o600)
+    if hasattr(os, "fchmod"):
+        os.fchmod(descriptor, 0o600)
+    else:
+        os.chmod(log_path, 0o600)
     with os.fdopen(descriptor, "a", encoding="utf-8") as log_file:
         log_file.write(message + "\n")
 

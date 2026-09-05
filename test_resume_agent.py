@@ -1,8 +1,10 @@
 import json
 import os
+import io
 import subprocess
 import sys
 import unittest
+import tempfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
@@ -43,6 +45,43 @@ from workflow import run_python_workflow, run_langgraph_workflow, build_langgrap
 
 
 class ResumeAgentTests(unittest.TestCase):
+    def test_font_candidates_include_windows_font_directories(self):
+        from delivery import _font_candidates
+        candidates = [str(path).lower() for path in _font_candidates()]
+        if os.name == "nt":
+            self.assertTrue(any("fonts" in path for path in candidates))
+        else:
+            self.assertTrue(any("/usr/share/fonts" in path for path in candidates))
+
+    @unittest.skipUnless(os.name != "nt", "Linux font fallback contract")
+    def test_pdf_and_image_font_selection_have_separate_linux_fallbacks(self):
+        from types import SimpleNamespace
+        import delivery
+
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory) / "cjk.ttf"
+            candidate.write_bytes(b"font")
+            with patch.object(delivery, "_font_candidates", return_value=(str(candidate),)), \
+                    patch.object(delivery.shutil, "which", return_value="fc-match"), \
+                    patch.object(delivery.subprocess, "run", return_value=SimpleNamespace(stdout="/missing/fallback.ttf")):
+                self.assertEqual(delivery._pdf_font_path(), str(candidate))
+
+            with patch.object(delivery.shutil, "which", return_value="fc-match"), \
+                    patch.object(delivery.subprocess, "run", return_value=SimpleNamespace(stdout=str(candidate))):
+                self.assertEqual(delivery._image_font_path(), str(candidate))
+
+    def test_fsync_directory_is_best_effort_on_windows(self):
+        from delivery import _fsync_directory
+        with tempfile.TemporaryDirectory() as directory:
+            _fsync_directory(Path(directory))
+
+    @unittest.skipUnless(os.name == "nt", "仅 Windows 需要目录句柄刷新回归")
+    def test_fsync_directory_flushes_windows_directory_handle(self):
+        from delivery import _fsync_directory
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("delivery._flush_windows_directory") as flush:
+                _fsync_directory(Path(directory))
+            flush.assert_called_once_with(Path(directory))
     def test_job_title_override_only_changes_header_direction(self):
         source = """张三
 
@@ -151,6 +190,37 @@ class ResumeAgentTests(unittest.TestCase):
             with __import__("PIL.Image", fromlist=["Image"]).open(png) as rendered:
                 self.assertEqual(rendered.getpixel((2, 2)), (255, 255, 255))
 
+    def test_pdf_photo_export_reopens_temp_image_on_windows(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            photo = root / "photo.png"
+            pdf = root / "resume.pdf"
+            __import__("PIL.Image", fromlist=["Image"]).new("RGB", (120, 160), "#4A90E2").save(photo)
+            export_single_page_pdf("# Name\n\n## Experience\n\nBuilt reliable systems", pdf, photo_path=photo)
+            self.assertTrue(pdf.is_file())
+            self.assertGreater(pdf.stat().st_size, 0)
+
+    def test_delivery_ats_bytes_preserve_utf8_newlines(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            resume = "# Name\n\n## Experience\n\nBuilt reliable systems\n"
+            result = export_delivery_package(resume, root)
+            self.assertEqual(result["status"], "pass")
+            self.assertEqual((root / "final-resume-ats.md").read_bytes(), resume.encode("utf-8"))
+
+    def test_fsync_file_accepts_windows_file_handles(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "artifact.bin"
+            path.write_bytes(b"artifact")
+            from delivery import _fsync_file
+            _fsync_file(path)
+
+    def test_write_private_text_preserves_utf8_newlines(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "resume.md"
+            main_module.write_private_text(path, "# Name\n\nBody\n")
+            self.assertEqual(path.read_bytes(), b"# Name\n\nBody\n")
+
     def test_delivery_qa_rejects_png_replaced_after_render(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -167,11 +237,14 @@ class ResumeAgentTests(unittest.TestCase):
             self.assertIn("PNG预览与PDF内容不一致", result["findings"])
 
     def test_langgraph_job_title_stays_inside_validated_graph(self):
-        result = run_langgraph_workflow(
-            "张三\n个人信息\n张三\n工作经历\n某公司｜研发实习生",
-            "岗位名称：大模型应用研发实习生",
-            job_title="大模型应用研发",
-        )
+        try:
+            result = run_langgraph_workflow(
+                "张三\n个人信息\n张三\n工作经历\n某公司｜研发实习生",
+                "岗位名称：大模型应用研发实习生",
+                job_title="大模型应用研发",
+            )
+        except RuntimeError:
+            self.skipTest("LangGraph 未安装")
         self.assertEqual(result["violations"], [])
         self.assertIn("**求职方向：大模型应用研发**", result["final_resume"])
 
@@ -371,10 +444,12 @@ class ResumeAgentTests(unittest.TestCase):
             release_dir = root / pointer["path"]
             self.assertEqual(pointer, qa["release"])
             self.assertTrue(release_dir.is_dir())
-            self.assertEqual(release_dir.stat().st_mode & 0o777, 0o700)
+            if os.name != "nt":
+                self.assertEqual(release_dir.stat().st_mode & 0o777, 0o700)
             for name in ("final-resume-ats.md", "final-resume.pdf", "final-resume.png"):
                 self.assertEqual((release_dir / name).read_bytes(), (root / name).read_bytes())
-                self.assertEqual((release_dir / name).stat().st_mode & 0o777, 0o600)
+                if os.name != "nt":
+                    self.assertEqual((release_dir / name).stat().st_mode & 0o777, 0o600)
             manifest = release_dir / "release-manifest.json"
             self.assertEqual(
                 pointer["manifest_sha256"],
@@ -403,7 +478,12 @@ class ResumeAgentTests(unittest.TestCase):
     def test_delivery_rejects_symlink_release_paths(self):
         with TemporaryDirectory() as directory, TemporaryDirectory() as outside:
             root = Path(directory)
-            (root / "releases").symlink_to(Path(outside), target_is_directory=True)
+            try:
+                (root / "releases").symlink_to(Path(outside), target_is_directory=True)
+            except OSError as error:
+                if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+                    self.skipTest("当前 Windows 账户未启用创建符号链接权限")
+                raise
             with self.assertRaises(ValueError):
                 export_delivery_package("# 候选人\n\n正文", root)
 
@@ -441,8 +521,9 @@ class ResumeAgentTests(unittest.TestCase):
             checksum = (output / "run-manifest.sha256").read_text(encoding="utf-8")
             self.assertIn("run-manifest.json", checksum)
             self.assertNotIn("run-manifest.json", manifest["produced"])
-            self.assertEqual(output.stat().st_mode & 0o777, 0o700)
-            self.assertTrue(all(path.stat().st_mode & 0o777 == 0o600 for path in output.iterdir() if path.is_file()))
+            if os.name != "nt":
+                self.assertEqual(output.stat().st_mode & 0o777, 0o700)
+                self.assertTrue(all(path.stat().st_mode & 0o777 == 0o600 for path in output.iterdir() if path.is_file()))
 
     def test_cli_unknown_error_is_sanitized_and_exit_two(self):
         with patch.object(main_module, "_run_cli", side_effect=ValueError("PRIVATE-CONTENT")):
@@ -527,7 +608,12 @@ class ResumeAgentTests(unittest.TestCase):
             real = root / "real"
             real.mkdir()
             link = root / "link"
-            link.symlink_to(real, target_is_directory=True)
+            try:
+                link.symlink_to(real, target_is_directory=True)
+            except OSError as error:
+                if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+                    self.skipTest("当前 Windows 账户未启用创建符号链接权限")
+                raise
             with self.assertRaisesRegex(ValueError, "符号链接"):
                 prepare_output_dir(link)
 
@@ -538,7 +624,12 @@ class ResumeAgentTests(unittest.TestCase):
             target.write_text("keep", encoding="utf-8")
             output = root / "output"
             output.mkdir()
-            (output / "final-resume.md").symlink_to(target)
+            try:
+                (output / "final-resume.md").symlink_to(target)
+            except OSError as error:
+                if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+                    self.skipTest("当前 Windows 账户未启用创建符号链接权限")
+                raise
             prepare_output_dir(output)
             self.assertEqual(target.read_text(encoding="utf-8"), "keep")
             self.assertFalse((output / "final-resume.md").exists())
@@ -1122,7 +1213,12 @@ class ResumeAgentTests(unittest.TestCase):
             output.mkdir()
             target = root / "target.log"
             target.write_text("keep", encoding="utf-8")
-            (output / "llm-call.log").symlink_to(target)
+            try:
+                (output / "llm-call.log").symlink_to(target)
+            except OSError as error:
+                if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+                    self.skipTest("当前 Windows 账户未启用创建符号链接权限")
+                raise
             with patch("llm_client.Path", return_value=module_path):
                 with self.assertRaisesRegex(RuntimeError, "符号链接"):
                     llm_client._write_log("request started=true")
@@ -1139,6 +1235,46 @@ class ResumeAgentTests(unittest.TestCase):
             self.assertEqual(process.returncode, 2)
             self.assertIn("UTF-8", process.stderr)
             self.assertNotIn("UTF-8", process.stdout)
+
+    def test_cli_unknown_error_survives_ascii_stderr(self):
+        class AsciiStderr(io.BytesIO):
+            encoding = "ascii"
+
+            def write(self, value):
+                if isinstance(value, str):
+                    value.encode("ascii")
+                    value = value.encode("ascii")
+                return super().write(value)
+
+        stream = AsciiStderr()
+        with patch.object(main_module, "_run_cli", side_effect=ValueError("internal")), patch.object(sys, "stderr", stream):
+            with self.assertRaises(SystemExit) as raised:
+                main_module.main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn(b"Run failed: ValueError", stream.getvalue())
+
+    def test_cli_export_survives_ascii_console_encoding(self):
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            environment = os.environ.copy()
+            environment["PYTHONIOENCODING"] = "ascii"
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "main.py",
+                    "--resume", "examples/resume.txt",
+                    "--jd", "examples/jd.txt",
+                    "--mock-llm", "--export-package",
+                    "--workflow", "python", "--output-dir", str(output),
+                ],
+                cwd=Path(__file__).parent,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertTrue((output / "final-resume.pdf").is_file())
 
 
 if __name__ == "__main__":

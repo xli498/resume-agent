@@ -6,6 +6,8 @@ import json
 import os
 import re
 import secrets
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -16,8 +18,47 @@ from PIL import Image, ImageOps
 DELIVERY_NAMES = ("final-resume-ats.md", "final-resume.pdf", "final-resume.png")
 
 
+def _flush_windows_directory(path: Path) -> None:
+    """Flush a directory handle so rename metadata reaches stable storage."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+    kernel32.FlushFileBuffers.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateFileW(
+        str(path),
+        0x40000000,  # GENERIC_WRITE
+        0x00000001 | 0x00000002 | 0x00000004,  # share read/write/delete
+        None,
+        3,  # OPEN_EXISTING
+        0x02000000,  # FILE_FLAG_BACKUP_SEMANTICS (directory handle)
+        None,
+    )
+    invalid = ctypes.c_void_p(-1).value
+    if handle in (None, invalid) or getattr(handle, "value", handle) == invalid:
+        error = ctypes.get_last_error()
+        raise OSError(error, f"无法打开目录句柄：{path}")
+    try:
+        if not kernel32.FlushFileBuffers(handle):
+            error = ctypes.get_last_error()
+            raise OSError(error, f"无法刷新目录句柄：{path}")
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _fsync_directory(path: Path) -> None:
     """同步目录项；无法确认持久化时让发布明确失败。"""
+    if os.name == "nt":
+        _flush_windows_directory(path)
+        return
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
@@ -26,7 +67,8 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _fsync_file(path: Path) -> None:
-    with path.open("rb") as stream:
+    # Windows requires a writable handle for FlushFileBuffers/os.fsync.
+    with path.open("r+b") as stream:
         os.fsync(stream.fileno())
 
 
@@ -118,16 +160,54 @@ def _publish_release_snapshot(staging_dir: Path, output_dir: Path) -> dict[str, 
         raise
 
 
-def _font_path() -> str:
-    candidates = (
+def _font_candidates(*, bold: bool = False) -> tuple[str, ...]:
+    candidates: list[str] = []
+    if os.name == "nt":
+        windows_root = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        local_fonts = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Fonts"
+        names = ("msyhbd.ttc", "simhei.ttf", "simsunb.ttf", "Dengb.ttf") if bold else ("msyh.ttc", "simhei.ttf", "simsun.ttc", "Deng.ttf")
+        candidates.extend(str(directory / name) for directory in (windows_root, local_fonts) for name in names)
+    candidates.extend((
         "/usr/share/fonts/HarmonyFont/Harmony-Regular.ttf",
         "/usr/share/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Regular.ttf",
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-    )
+    ))
+    return tuple(candidates)
+
+
+def _pdf_font_path(*, bold: bool = False) -> str:
+    candidates = _font_candidates(bold=bold)
+    # PDF text extraction depends on a real CJK font. Prefer explicit known
+    # candidates so an unavailable family name cannot resolve to DejaVu.
     for candidate in candidates:
         if Path(candidate).is_file():
             return candidate
+    if shutil.which("fc-match"):
+        family = "HarmonyHeiTi:style=Bold" if bold else "HarmonyHeiTi"
+        matched = subprocess.run(["fc-match", "-f", "%{file}", family], capture_output=True, text=True, check=False).stdout.strip()
+        if matched and Path(matched).is_file():
+            return matched
     raise RuntimeError("未找到可用于 PDF 的中文字体")
+
+
+def _image_font_path(*, bold: bool = False) -> str:
+    """Select the established image font while retaining a portable fallback."""
+    if os.name != "nt" and shutil.which("fc-match"):
+        family = "HarmonyHeiTi:style=Bold" if bold else "HarmonyHeiTi"
+        matched = subprocess.run(
+            ["fc-match", "-f", "%{file}", family],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        if matched and Path(matched).is_file():
+            return matched
+    return _pdf_font_path(bold=bold)
+
+
+def _font_path(*, bold: bool = False) -> str:
+    """Backward-compatible alias for PDF font selection."""
+    return _pdf_font_path(bold=bold)
 
 
 def _plain_lines(markdown: str) -> list[tuple[str, str]]:
@@ -205,12 +285,8 @@ def export_single_page_pdf(
     font_name = "ResumeAgentCJK"
     bold_name = "ResumeAgentCJKBold"
     if font_name not in pdfmetrics.getRegisteredFontNames():
-        pdfmetrics.registerFont(TTFont(font_name, _font_path()))
-    bold_candidates = (
-        "/usr/share/fonts/HarmonyFont/Harmony-Bold.ttf",
-        "/usr/share/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Bold.ttf",
-    )
-    bold_path = next((path for path in bold_candidates if Path(path).is_file()), _font_path())
+        pdfmetrics.registerFont(TTFont(font_name, _pdf_font_path()))
+    bold_path = _pdf_font_path(bold=True)
     if bold_name not in pdfmetrics.getRegisteredFontNames():
         pdfmetrics.registerFont(TTFont(bold_name, bold_path))
     width, height = A4
@@ -254,14 +330,19 @@ def export_single_page_pdf(
             raise FileNotFoundError(f"找不到照片：{source}")
         with Image.open(source) as original:
             cleaned = _trim_dark_side_canvas(original)
-            with tempfile.NamedTemporaryFile(suffix=".png") as temporary_photo:
-                cleaned.save(temporary_photo.name)
+            temporary_photo_path: str | None = None
+            try:
+                # Close the temporary file before ReportLab reopens it. Windows
+                # otherwise keeps the NamedTemporaryFile handle locked.
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temporary_photo:
+                    temporary_photo_path = temporary_photo.name
+                cleaned.save(temporary_photo_path)
                 x, py, box_w, box_h = photo_box
                 iw, ih = cleaned.size
                 scale = min(box_w / iw, box_h / ih)
                 draw_w, draw_h = iw * scale, ih * scale
                 pdf.drawImage(
-                    temporary_photo.name,
+                    temporary_photo_path,
                     x + (box_w - draw_w) / 2,
                     py + (box_h - draw_h) / 2,
                     width=draw_w,
@@ -269,6 +350,9 @@ def export_single_page_pdf(
                     preserveAspectRatio=True,
                     mask="auto",
                 )
+            finally:
+                if temporary_photo_path:
+                    Path(temporary_photo_path).unlink(missing_ok=True)
     for kind, text, size, leading, row_font in selected[1]:
         if kind == "heading":
             y -= selected[0] * 0.34
@@ -405,7 +489,9 @@ def export_delivery_package(
         staged_ats = staging_dir / ats_path.name
         staged_pdf = staging_dir / pdf_path.name
         staged_png = staging_dir / png_path.name
-        staged_ats.write_text(final_resume, encoding="utf-8")
+        # Preserve the exact UTF-8 bytes across platforms; Windows text mode
+        # would translate LF to CRLF and fail the byte-level ATS integrity gate.
+        staged_ats.write_bytes(final_resume.encode("utf-8"))
         export_single_page_pdf(final_resume, staged_pdf, photo_path=photo_path)
         render_pdf_preview(staged_pdf, staged_png)
         qa = qa_delivery(final_resume, staged_pdf, staged_png, staged_ats)
