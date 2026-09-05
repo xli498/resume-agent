@@ -1286,7 +1286,9 @@ def render_resume_image(
         return rows
 
     def write_wrapped(text, y, font=small, leading=36):
-        for row in wrap(text, font, W - 2 * margin):
+        # Leave a small deterministic cushion for font-side-bearing and
+        # rounding differences across Pillow/font implementations.
+        for row in wrap(text, font, W - 2 * margin - 8):
             bbox = draw.textbbox((margin, y), row, font=font)
             if intersects(bbox, photo_rect):
                 raise ValueError("照片与正文文字区域重叠")
