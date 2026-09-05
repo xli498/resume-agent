@@ -18,11 +18,46 @@ from PIL import Image, ImageOps
 DELIVERY_NAMES = ("final-resume-ats.md", "final-resume.pdf", "final-resume.png")
 
 
+def _flush_windows_directory(path: Path) -> None:
+    """Flush a directory handle so rename metadata reaches stable storage."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+    kernel32.FlushFileBuffers.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateFileW(
+        str(path),
+        0x40000000,  # GENERIC_WRITE
+        0x00000001 | 0x00000002 | 0x00000004,  # share read/write/delete
+        None,
+        3,  # OPEN_EXISTING
+        0x02000000,  # FILE_FLAG_BACKUP_SEMANTICS (directory handle)
+        None,
+    )
+    invalid = ctypes.c_void_p(-1).value
+    if handle in (None, invalid) or getattr(handle, "value", handle) == invalid:
+        error = ctypes.get_last_error()
+        raise OSError(error, f"无法打开目录句柄：{path}")
+    try:
+        if not kernel32.FlushFileBuffers(handle):
+            error = ctypes.get_last_error()
+            raise OSError(error, f"无法刷新目录句柄：{path}")
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _fsync_directory(path: Path) -> None:
     """同步目录项；无法确认持久化时让发布明确失败。"""
     if os.name == "nt":
-        # Windows does not expose portable directory fsync semantics through
-        # Python's os.open; files are still fsynced before the pointer switch.
+        _flush_windows_directory(path)
         return
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:

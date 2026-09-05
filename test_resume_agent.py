@@ -56,6 +56,14 @@ class ResumeAgentTests(unittest.TestCase):
         from delivery import _fsync_directory
         with tempfile.TemporaryDirectory() as directory:
             _fsync_directory(Path(directory))
+
+    @unittest.skipUnless(os.name == "nt", "仅 Windows 需要目录句柄刷新回归")
+    def test_fsync_directory_flushes_windows_directory_handle(self):
+        from delivery import _fsync_directory
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("delivery._flush_windows_directory") as flush:
+                _fsync_directory(Path(directory))
+            flush.assert_called_once_with(Path(directory))
     def test_job_title_override_only_changes_header_direction(self):
         source = """张三
 
