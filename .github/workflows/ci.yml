@@ -80,3 +80,22 @@ jobs:
           PY
       - name: Whitespace errors
         run: git diff --check
+
+  windows-export-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install project
+        run: python -m pip install --upgrade pip && python -m pip install .
+      - name: Windows PDF and PNG export smoke
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'resume-agent-export'
+          python main.py --resume examples/resume.txt --jd examples/jd.txt --mock-llm --export-package --workflow python --output-dir $output
+          foreach ($name in 'final-resume.pdf', 'final-resume.png', 'current-release.json') {
+            if (-not (Test-Path (Join-Path $output $name))) { throw "Missing $name" }
+          }

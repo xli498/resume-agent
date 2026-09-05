@@ -12,6 +12,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from llm_client import call_llm
+from delivery import _font_path
 
 
 # 读取 UTF-8 文本文件，并返回文件内容。
@@ -168,7 +169,9 @@ def write_private_text(path: Path, content: str) -> None:
     """简历产物默认仅当前用户可读写。"""
     if path.is_symlink():
         raise ValueError("拒绝写入符号链接产物")
-    path.write_text(content, encoding="utf-8")
+    # Write bytes explicitly so generated artifacts retain LF/UTF-8 identity
+    # on Windows instead of receiving implicit CRLF translation.
+    path.write_bytes(content.encode("utf-8"))
     path.chmod(0o600)
 
 
@@ -1194,10 +1197,8 @@ def render_resume_image(
     if not photo_path.is_file():
         raise FileNotFoundError(f"找不到照片：{photo_path}")
     from PIL import Image, ImageDraw, ImageFont, ImageOps
-    import subprocess
-
-    font_path = subprocess.check_output(["fc-match", "-f", "%{file}", "HarmonyHeiTi"], text=True).strip()
-    bold_path = subprocess.check_output(["fc-match", "-f", "%{file}", "HarmonyHeiTi:style=Bold"], text=True).strip()
+    font_path = _font_path()
+    bold_path = _font_path(bold=True)
     W, margin, header_h = 1600, 105, 390
     if template == "ats":
         navy, blue, ink, muted, line, white = "#202020", "#202020", "#202020", "#555555", "#CFCFCF", "#FFFFFF"
