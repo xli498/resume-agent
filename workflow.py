@@ -33,6 +33,7 @@ class ResumeWorkflowState(TypedDict, total=False):
     confirmation_questions: list[dict[str, Any]]
     targeted_draft: str
     job_title: str
+    finance_mode: bool | None
 
 
 def run_python_workflow(
@@ -40,9 +41,10 @@ def run_python_workflow(
     jd_text: str,
     llm_raw: str | None = None,
     job_title: str | None = None,
+    finance_mode: bool | None = None,
 ) -> dict[str, Any]:
     """执行无框架的标准流程，作为默认和回滚路径。"""
-    analysis = build_analysis(resume_text, jd_text)
+    analysis = build_analysis(resume_text, jd_text, finance_mode=finance_mode)
     fact_ledger = build_fact_ledger(resume_text)
     analysis["fact_ledger"] = fact_ledger
     result: dict[str, Any] = {
@@ -88,7 +90,7 @@ def build_langgraph_workflow():
         return {"fact_ledger": build_fact_ledger(state["resume_text"])}
 
     def analyze(state):
-        analysis = build_analysis(state["resume_text"], state["jd_text"])
+        analysis = build_analysis(state["resume_text"], state["jd_text"], finance_mode=state.get("finance_mode"))
         analysis["fact_ledger"] = state["fact_ledger"]
         return {
             "analysis": analysis,
@@ -146,6 +148,7 @@ def run_langgraph_workflow(
     jd_text: str,
     llm_result: dict | None = None,
     job_title: str | None = None,
+    finance_mode: bool | None = None,
 ) -> dict[str, Any]:
     """使用 LangGraph 编排同一套核心节点；依赖不存在时给出明确提示。"""
     if llm_result is not None:
@@ -156,5 +159,6 @@ def run_langgraph_workflow(
         "jd_text": jd_text,
         "llm_result": llm_result or {},
         "job_title": job_title or "",
+        "finance_mode": finance_mode,
     })
     return result
