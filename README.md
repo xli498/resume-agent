@@ -145,9 +145,18 @@ python3 main.py --workflow langgraph --resume examples/resume.txt --jd examples/
 ## 测试
 
 ```bash
-python3 -m py_compile main.py workflow.py llm_client.py test_resume_agent.py
+python3 -m py_compile main.py workflow.py llm_client.py finance_keywords.py test_resume_agent.py
 python3 -m unittest -q
 ```
+
+## 🏦 金融岗位模式
+
+投递银行 / 证券 / 基金 / 保险 / 财务 / 审计 / 风控等岗位时，可启用金融岗位模式，让匹配分析"懂金融"：
+
+- **自动检测**：JD 中出现"银行、证券、基金、保险、财务、审计、风控"等词时自动开启；也可在 Web 界面勾选"🏦 金融岗位模式"强制开启，或用 CLI `--finance` / `--no-finance` 手动控制。
+- **金融能力词典**（`finance_keywords.py`）：财务分析、估值建模（DCF/WACC）、风险管理（VaR）、年报解读、行业研究、量化策略、Python 金融数据分析（pandas/Tushare/Wind）、审计税务、投行资管等 16 类能力概念，JD 解析时优先识别。
+- **金融视角重述**：改写简历时优先用金融视角重述已有经历（例如把"用 Python 处理 3.4 万条文本"表述为"用 Python 对 3.4 万条年报文本做结构化处理与实证分析"）。**只重述已有事实，绝不编造**——没有证据的证书（CPA/CFA 等）一律进缺口清单。
+- **示例**：`examples/jd_finance.txt`（银行风控岗 JD）+ `examples/resume_finance.txt`，运行 `python3 main.py --resume examples/resume_finance.txt --jd examples/jd_finance.txt` 即可看到金融模式的匹配报告。
 
 ## 隐私与安全
 

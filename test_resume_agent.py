@@ -1276,6 +1276,47 @@ class ResumeAgentTests(unittest.TestCase):
             self.assertEqual(process.returncode, 0, process.stderr)
             self.assertTrue((output / "final-resume.pdf").is_file())
 
+    def test_finance_jd_auto_detection(self):
+        from finance_keywords import detect_finance_jd
+        self.assertTrue(detect_finance_jd("银行信贷风险管理岗，要求熟悉风控模型"))
+        self.assertTrue(detect_finance_jd("证券行业研究员"))
+        self.assertFalse(detect_finance_jd("客户运营实习生，熟悉Excel"))
+        self.assertTrue(detect_finance_jd("产品经理", job_title="银行AI产品经理"))
+
+    def test_finance_mode_enriches_requirements(self):
+        resume = "张三\n用 Python 处理年报文本，做财务数据分析。\n"
+        finance_jd = "银行风控岗\n岗位要求：熟悉风险管理与财务分析，掌握 DCF 估值。"
+        plain_jd = "客户运营实习生\n岗位要求：熟悉Excel。"
+        fin = build_analysis(resume, finance_jd)
+        plain = build_analysis(resume, plain_jd)
+        self.assertTrue(fin["finance_mode"])
+        self.assertFalse(plain["finance_mode"])
+        fin_reqs = {item["requirement"] for item in fin["match_matrix"]}
+        self.assertIn("风险管理", fin_reqs)
+        self.assertIn("财务分析", fin_reqs)
+        plain_reqs = {item["requirement"] for item in plain["match_matrix"]}
+        self.assertNotIn("风险管理", plain_reqs)
+
+    def test_finance_mode_flag_override(self):
+        resume = "张三\n熟悉Excel。\n"
+        jd = "客户运营实习生\n岗位要求：熟悉Excel。"
+        forced = build_analysis(resume, jd, finance_mode=True)
+        self.assertTrue(forced["finance_mode"])
+        prompt = build_llm_prompt(resume, jd, forced)
+        self.assertIn("金融岗位模式", prompt)
+        off = build_analysis(resume, jd, finance_mode=False)
+        prompt_off = build_llm_prompt(resume, jd, off)
+        self.assertNotIn("金融岗位模式", prompt_off)
+
+    def test_finance_mode_does_not_fabricate(self):
+        # 金融模式不得凭空产生证据：无年报经历的简历，财务分析应为缺口而非匹配
+        resume = "张三\n熟悉Excel，做客户沟通。\n"
+        jd = "银行风控岗\n岗位要求：熟悉财务分析。"
+        analysis = build_analysis(resume, jd, finance_mode=True)
+        item = next(i for i in analysis["match_matrix"] if i["requirement"] == "财务分析")
+        self.assertEqual(item["evidence_ids"], [])
+        self.assertIn("未发现", item["gap"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,13 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from llm_client import call_llm
 from delivery import _image_font_path
+from finance_keywords import (
+    FINANCE_CAPABILITIES,
+    FINANCE_KNOWN_REQUIREMENTS,
+    FINANCE_PROMPT_GUIDANCE,
+    detect_finance_jd,
+    finance_signals_in_resume,
+)
 
 
 # 读取 UTF-8 文本文件，并返回文件内容。
@@ -213,12 +220,13 @@ JD_KNOWN_REQUIREMENTS = (
 EDUCATION_LEVELS = {"高中": 1, "中专": 1, "大专": 2, "专科": 2, "本科": 3, "硕士": 4, "博士": 5}
 
 
-def _extract_requirements_from_line(line: str) -> list[str]:
+def _extract_requirements_from_line(line: str, finance_mode: bool = False) -> list[str]:
     """提取可审计要求，避免把连接词和标题碎片当成独立要求。"""
     stripped = line.strip()
     if re.match(r"^(职位名称|岗位名称|职位|岗位)\s*[：:]", stripped):
         return []
-    found = [term for term in JD_KNOWN_REQUIREMENTS if term.casefold() in stripped.casefold()]
+    known_requirements = JD_KNOWN_REQUIREMENTS + (FINANCE_KNOWN_REQUIREMENTS if finance_mode else ())
+    found = [term for term in known_requirements if term.casefold() in stripped.casefold()]
     # 保留常见经验对象，避免把“项目经验/销售经验”降级成无法解释的泛化要求。
     experience_terms = re.findall(r"(?:项目|销售|运营|研发|相关工作)经验", stripped)
     found.extend(experience_terms)
@@ -406,18 +414,21 @@ def _constraint_metadata(clause: str, requirement: str) -> dict:
     }
 
 
-def _semantic_terms(requirement: str) -> set[str]:
+def _semantic_terms(requirement: str, finance_mode: bool = False) -> set[str]:
     terms: set[str] = set()
-    for concept, aliases in SEMANTIC_CONCEPTS.items():
+    concepts = SEMANTIC_CONCEPTS
+    if finance_mode:
+        concepts = {**SEMANTIC_CONCEPTS, **FINANCE_CAPABILITIES}
+    for concept, aliases in concepts.items():
         folded = {alias.casefold() for alias in aliases}
         if requirement.casefold() == concept.casefold() or requirement.casefold() in folded:
             terms.update(folded)
     return {term for term in terms if len(term) > 1}
 
 
-def _evidence_for_requirement(fact_ledger: list[dict], requirement: str) -> tuple[list[str], list[str], list[str]]:
+def _evidence_for_requirement(fact_ledger: list[dict], requirement: str, finance_mode: bool = False) -> tuple[list[str], list[str], list[str]]:
     exact_term = requirement.casefold()
-    semantic_terms = _semantic_terms(requirement)
+    semantic_terms = _semantic_terms(requirement, finance_mode=finance_mode)
     direct_ids: list[str] = []
     semantic_ids: list[str] = []
     matched_terms: list[str] = []
@@ -520,7 +531,7 @@ def _evaluate_constraint(
 
 
 # 将岗位 JD 与简历内容整理成结构化结果。
-def build_match_matrix(resume_text: str, jd_text: str = "") -> list[dict]:
+def build_match_matrix(resume_text: str, jd_text: str = "", finance_mode: bool = False) -> list[dict]:
     """将岗位要求映射到事实账本，给出可追溯的规则+概念语义判断。"""
     if not jd_text.strip():
         return []
@@ -540,7 +551,7 @@ def build_match_matrix(resume_text: str, jd_text: str = "") -> list[dict]:
     evidenced_education, evidenced_education_level, education_evidence_ids = _education_from_facts(fact_ledger)
     evidenced_age, age_evidence_ids = _age_from_facts(fact_ledger)
     for line in jd_lines:
-        phrases = _extract_requirements_from_line(line)
+        phrases = _extract_requirements_from_line(line, finance_mode=finance_mode)
         # 斜杠证书/技能拆成候选项，同时保留同一 OR 分组的上下文。
         expanded_phrases = []
         for phrase in phrases:
@@ -560,7 +571,7 @@ def build_match_matrix(resume_text: str, jd_text: str = "") -> list[dict]:
             clause = _clause_for_requirement(line, requirement)
             item_keywords = [requirement] if requirement != line[:80] else []
             matches = match_keywords(resume_text, item_keywords)
-            evidence_ids, semantic_evidence_ids, semantic_hits = _evidence_for_requirement(fact_ledger, requirement)
+            evidence_ids, semantic_evidence_ids, semantic_hits = _evidence_for_requirement(fact_ledger, requirement, finance_mode=finance_mode)
             exact_hit = any(matches.values())
             level = "较强匹配" if exact_hit else "待补证据" if semantic_evidence_ids else "缺口"
             constraint = _constraint_metadata(clause, requirement)
@@ -698,8 +709,10 @@ def build_confirmation_questions_report(questions: list[dict]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def build_analysis(resume_text: str, jd_text: str) -> dict:
-    matrix = build_match_matrix(resume_text, jd_text)
+def build_analysis(resume_text: str, jd_text: str, finance_mode: bool | None = None) -> dict:
+    if finance_mode is None:
+        finance_mode = detect_finance_jd(jd_text)
+    matrix = build_match_matrix(resume_text, jd_text, finance_mode=finance_mode)
     dynamic_keywords = [
         keyword for item in matrix for keyword in item.get("keywords", [])
     ]
@@ -709,6 +722,8 @@ def build_analysis(resume_text: str, jd_text: str) -> dict:
         "fact_ledger": build_fact_ledger(resume_text),
         "resume_sections": parse_resume(resume_text),
         "jd_length": len(jd_text),
+        "finance_mode": finance_mode,
+        "finance_signals": finance_signals_in_resume(resume_text) if finance_mode else [],
         "keyword_matches": keyword_matches,
         "matched_keywords": [
             keyword for keyword, matched in keyword_matches.items() if matched
@@ -717,6 +732,7 @@ def build_analysis(resume_text: str, jd_text: str) -> dict:
             keyword for keyword, matched in keyword_matches.items() if not matched
         ],
         "match_matrix": matrix,
+        "requirements": matrix,  # 前端展示用别名
         "confirmation_questions": build_confirmation_questions(matrix),
     }
 
@@ -836,6 +852,11 @@ def build_llm_prompt(resume_text: str, jd_text: str, analysis: dict) -> str:
     """构造供后续大模型调用的提示词；本步骤只生成，不发送。"""
     matrix_json = json.dumps(analysis["match_matrix"], ensure_ascii=False, indent=2)
     facts_json = json.dumps(analysis["fact_ledger"], ensure_ascii=False, indent=2)
+    finance_block = ""
+    if analysis.get("finance_mode"):
+        signals = analysis.get("finance_signals") or []
+        signal_line = "、".join(signals) if signals else "无"
+        finance_block = f"\n\n[金融岗位模式已启用] 候选人简历中与金融相关的已有经历信号词：{signal_line}。\n" + FINANCE_PROMPT_GUIDANCE
     return f"""你是一名严谨的简历分析助手。
 
 任务：基于岗位 JD 和候选人简历，输出岗位匹配分析与修改建议。
@@ -865,7 +886,7 @@ def build_llm_prompt(resume_text: str, jd_text: str, analysis: dict) -> str:
 
 候选人事实账本：
 {facts_json}
-
+{finance_block}
 请输出：
 一、岗位匹配结论
 二、优势证据
@@ -1399,6 +1420,18 @@ def _run_cli() -> None:
         default="python",
         help="工作流实现；默认 python，langgraph 需要额外安装依赖",
     )
+    finance_group = parser.add_mutually_exclusive_group()
+    finance_group.add_argument(
+        "--finance",
+        action="store_true",
+        default=None,
+        help="强制启用金融岗位模式；不指定则按 JD 自动检测",
+    )
+    finance_group.add_argument(
+        "--no-finance",
+        action="store_true",
+        help="强制关闭金融岗位模式",
+    )
     args = parser.parse_args()
     started_at = datetime.now(timezone.utc).isoformat()
 
@@ -1416,7 +1449,15 @@ def _run_cli() -> None:
         _print_error("读取失败：输入文件不是有效的 UTF-8 文本", "Read failed: input is not valid UTF-8")
         raise SystemExit(2)
 
-    analysis = build_analysis(resume_text, jd_text)
+    # 金融模式：--finance 强制开，--no-finance 强制关，都不指定则按 JD 自动检测。
+    if args.finance:
+        finance_mode = True
+    elif args.no_finance:
+        finance_mode = False
+    else:
+        finance_mode = None
+
+    analysis = build_analysis(resume_text, jd_text, finance_mode=finance_mode)
     output_dir = args.output_dir or (project_dir / "output" / args.template)
     if not output_dir.is_absolute():
         output_dir = project_dir / output_dir
@@ -1435,14 +1476,14 @@ def _run_cli() -> None:
             try:
                 from workflow import run_langgraph_workflow
                 final_resume = run_langgraph_workflow(
-                    resume_text, jd_text, job_title=args.job_title
+                    resume_text, jd_text, job_title=args.job_title, finance_mode=finance_mode
                 )["final_resume"]
             except (RuntimeError, ValueError) as error:
                 _print_error(f"LangGraph工作流不可用：{error}", "LangGraph workflow unavailable")
                 raise SystemExit(2)
         else:
             from workflow import run_python_workflow
-            final_resume = run_python_workflow(resume_text, jd_text, job_title=args.job_title)["final_resume"]
+            final_resume = run_python_workflow(resume_text, jd_text, job_title=args.job_title, finance_mode=finance_mode)["final_resume"]
         violations = validate_resume_draft(final_resume)
         violations.extend(validate_resume_evidence(resume_text, final_resume))
         if violations:
@@ -1471,7 +1512,7 @@ def _run_cli() -> None:
             if args.workflow == "langgraph":
                 from workflow import run_langgraph_workflow
                 final_resume = run_langgraph_workflow(
-                    resume_text, jd_text, parsed_result, job_title=args.job_title
+                    resume_text, jd_text, parsed_result, job_title=args.job_title, finance_mode=finance_mode
                 )["final_resume"]
             else:
                 final_resume = build_final_resume(resume_text, parsed_result, jd_text, job_title=args.job_title)
@@ -1521,7 +1562,7 @@ def _run_cli() -> None:
             if args.workflow == "langgraph":
                 from workflow import run_langgraph_workflow
                 final_resume = run_langgraph_workflow(
-                    resume_text, jd_text, parsed_result, job_title=args.job_title
+                    resume_text, jd_text, parsed_result, job_title=args.job_title, finance_mode=finance_mode
                 )["final_resume"]
             else:
                 final_resume = build_final_resume(resume_text, parsed_result, jd_text, job_title=args.job_title)
