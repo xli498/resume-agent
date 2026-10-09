@@ -1,5 +1,13 @@
 # Resume Agent
 
+<p align="center">
+  <a href="docs/demo-20s.mp4">
+    <img src="docs/demo-preview.gif" alt="点击观看 20 秒演示视频" width="640">
+  </a>
+</p>
+
+<p align="center">🎬 <a href="docs/demo-20s.mp4"><b>观看 20 秒演示视频</b></a> ｜ 金融 AI 落地：证据感知的简历 Agent，金融岗位模式一键生成定向简历</p>
+
 一个以真实性门禁为核心的简历与岗位匹配 Agent：读取候选人简历和岗位 JD，生成匹配分析、定向简历草稿、证据映射报告，并可选渲染带照片的简历图片。
 
 > 当前定位：可审计的个人项目 / Demo。它不会替候选人核实事实，也不保证 ATS 评分、面试结果或录用结果。投递前必须由本人复核所有时间、数字、职责和成果。
