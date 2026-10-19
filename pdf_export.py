@@ -49,6 +49,30 @@ def _subset_font(font_path: str, text: str) -> bytes:
     return buf.getvalue()
 
 
+def verify_pdf(pdf_bytes: bytes, source_text: str = "") -> list[str]:
+    """PDF 回归自检：确保导出的 PDF 是 ATS 可解析的。
+
+    学自 Reactive-Resume 的 ats-extraction 测试：自己导出的 PDF 必须拿满分。
+    返回问题列表；空列表表示通过。
+    """
+    import pymupdf
+    issues: list[str] = []
+    doc = pymupdf.open(stream=pdf_bytes)
+    extracted = "".join(page.get_text() for page in doc)
+    doc.close()
+    if not extracted.strip():
+        issues.append("NO_TEXT_LAYER：PDF 无可提取文本")
+        return issues
+    if "�" in extracted:
+        issues.append("REPLACEMENT_CHARACTERS：出现替换字符")
+    if source_text:
+        src_zh = len(re.findall(r"[\u4e00-\u9fff]", source_text))
+        ext_zh = len(re.findall(r"[\u4e00-\u9fff]", extracted))
+        if src_zh > 20 and ext_zh < src_zh * 0.5:
+            issues.append(f"GARBLED_TEXT：中文丢失（原文{src_zh}字，PDF仅{ext_zh}字）")
+    return issues
+
+
 def render_pdf(markdown_text: str) -> bytes:
     """渲染简历 PDF，返回字节。"""
     import pymupdf

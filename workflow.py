@@ -29,7 +29,7 @@ from claim_ledger import (
     validate_claims,
     validate_defense_coverage,
 )
-from ats_check import check_ats
+from ats_check import check_ats, score_ats
 
 
 class ResumeWorkflowState(TypedDict, total=False):
@@ -96,6 +96,7 @@ def run_python_workflow(
     dig_questions = build_dig_questions(claims)
     coverage = match_coverage(analysis.get("requirements", []))
     ats_checks = check_ats(resume_text, jd_text, coverage)
+    ats_score = score_ats(resume_text)
     result: dict[str, Any] = {
         "analysis": analysis,
         "fact_ledger": fact_ledger,
@@ -106,6 +107,7 @@ def run_python_workflow(
         "dig_questions": dig_questions,
         "match_coverage": coverage,
         "ats_checks": ats_checks,
+        "ats_score": ats_score["score"],
         "confirmation_questions": analysis["confirmation_questions"],
     }
     if llm_raw is None:
