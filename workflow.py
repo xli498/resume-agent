@@ -19,9 +19,15 @@ from main import (
     validate_resume_evidence,
 )
 from claim_ledger import (
+    add_interview_claims,
+    build_dig_questions,
     build_interview_defense,
     check_role_downgrade,
+    claim_risk_flags,
     extract_atomic_claims,
+    match_coverage,
+    validate_claims,
+    validate_defense_coverage,
 )
 
 
@@ -43,6 +49,31 @@ class ResumeWorkflowState(TypedDict, total=False):
     finance_mode: bool | None
 
 
+def apply_dig_answers(
+    resume_text: str,
+    claims: list[dict[str, Any]],
+    qa_pairs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """深挖回答 → 新 Claim（origin=interview）→ 重建面试防御。
+
+    对应 sushen 的"回答转 Claim"：保留用户原话，去重，不编造。
+    """
+    new_claims = add_interview_claims(claims, qa_pairs)
+    claim_errors = validate_claims(new_claims, resume_text)
+    for claim in new_claims:
+        if "risk_flags" not in claim:
+            claim["risk_flags"] = claim_risk_flags(claim)
+    interview_defense = build_interview_defense(new_claims)
+    defense_errors = validate_defense_coverage(interview_defense, new_claims)
+    return {
+        "claims": new_claims,
+        "claim_errors": claim_errors,
+        "interview_defense": interview_defense,
+        "defense_errors": defense_errors,
+        "added": len(new_claims) - len(claims),
+    }
+
+
 def run_python_workflow(
     resume_text: str,
     jd_text: str,
@@ -56,12 +87,22 @@ def run_python_workflow(
     analysis["fact_ledger"] = fact_ledger
     # Claim Ledger 原子事实层 + 面试防御（学自 sushen-resume-maker）
     claims = extract_atomic_claims(resume_text)
+    claim_errors = validate_claims(claims, resume_text)
+    for claim in claims:
+        claim["risk_flags"] = claim_risk_flags(claim)
     interview_defense = build_interview_defense(claims)
+    defense_errors = validate_defense_coverage(interview_defense, claims)
+    dig_questions = build_dig_questions(claims)
+    coverage = match_coverage(analysis.get("requirements", []))
     result: dict[str, Any] = {
         "analysis": analysis,
         "fact_ledger": fact_ledger,
         "claims": claims,
+        "claim_errors": claim_errors,
         "interview_defense": interview_defense,
+        "defense_errors": defense_errors,
+        "dig_questions": dig_questions,
+        "match_coverage": coverage,
         "confirmation_questions": analysis["confirmation_questions"],
     }
     if llm_raw is None:
