@@ -73,7 +73,9 @@ def verify_pdf(pdf_bytes: bytes, source_text: str = "") -> list[str]:
     return issues
 
 
-def render_pdf(markdown_text: str) -> bytes:
+def render_pdf(markdown_text: str, density: str = "compact") -> bytes:
+    """渲染简历 PDF。density: compact（紧凑，默认）/ spacious（疏朗）。
+    学自 sadanandpai/resume-builder 的 density 思想。"""
     """渲染简历 PDF，返回字节。"""
     import pymupdf
 
@@ -87,11 +89,14 @@ def render_pdf(markdown_text: str) -> bytes:
             except Exception:
                 font_buffers[alias] = Path(path).read_bytes()
 
+    # 密度设置：compact 0.8 / spacious 1.2（学自 sadanandpai）
+    factor = 0.8 if density == "compact" else 1.2
     doc = pymupdf.open()
     page = doc.new_page(width=595, height=842)  # A4
-    margin = 56
+    margin = int(56 * factor)
     cursor = margin
     max_width = 595 - 2 * margin
+    _line_factor = 1.5 * (0.95 if density == "compact" else 1.05)
 
     def _register(pg) -> None:
         for alias, buf in font_buffers.items():
@@ -117,7 +122,7 @@ def render_pdf(markdown_text: str) -> bytes:
             ensure(size * 1.6)
             page.insert_text((margin + indent, cursor), chunk,
                              fontname=font, fontsize=size, color=color)
-            cursor += size * 1.5
+            cursor += size * _line_factor
         cursor += gap
 
     for kind, text in _parse_markdown(markdown_text):
