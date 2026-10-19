@@ -18,6 +18,18 @@ from main import (
     validate_resume_draft,
     validate_resume_evidence,
 )
+from claim_ledger import (
+    add_interview_claims,
+    build_dig_questions,
+    build_interview_defense,
+    check_role_downgrade,
+    claim_risk_flags,
+    extract_atomic_claims,
+    match_coverage,
+    validate_claims,
+    validate_defense_coverage,
+)
+from ats_check import check_ats, score_ats
 
 
 class ResumeWorkflowState(TypedDict, total=False):
@@ -28,12 +40,39 @@ class ResumeWorkflowState(TypedDict, total=False):
     final_resume: str
     violations: list[str]
     fact_ledger: list[dict[str, Any]]
+    claims: list[dict[str, Any]]
+    interview_defense: list[dict[str, Any]]
     accepted_revisions: list[dict[str, Any]]
     rejected_revisions: list[str]
     confirmation_questions: list[dict[str, Any]]
     targeted_draft: str
     job_title: str
     finance_mode: bool | None
+
+
+def apply_dig_answers(
+    resume_text: str,
+    claims: list[dict[str, Any]],
+    qa_pairs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """深挖回答 → 新 Claim（origin=interview）→ 重建面试防御。
+
+    对应 sushen 的"回答转 Claim"：保留用户原话，去重，不编造。
+    """
+    new_claims = add_interview_claims(claims, qa_pairs)
+    claim_errors = validate_claims(new_claims, resume_text)
+    for claim in new_claims:
+        if "risk_flags" not in claim:
+            claim["risk_flags"] = claim_risk_flags(claim)
+    interview_defense = build_interview_defense(new_claims)
+    defense_errors = validate_defense_coverage(interview_defense, new_claims)
+    return {
+        "claims": new_claims,
+        "claim_errors": claim_errors,
+        "interview_defense": interview_defense,
+        "defense_errors": defense_errors,
+        "added": len(new_claims) - len(claims),
+    }
 
 
 def run_python_workflow(
@@ -47,9 +86,28 @@ def run_python_workflow(
     analysis = build_analysis(resume_text, jd_text, finance_mode=finance_mode)
     fact_ledger = build_fact_ledger(resume_text)
     analysis["fact_ledger"] = fact_ledger
+    # Claim Ledger 原子事实层 + 面试防御（学自 sushen-resume-maker）
+    claims = extract_atomic_claims(resume_text)
+    claim_errors = validate_claims(claims, resume_text)
+    for claim in claims:
+        claim["risk_flags"] = claim_risk_flags(claim)
+    interview_defense = build_interview_defense(claims)
+    defense_errors = validate_defense_coverage(interview_defense, claims)
+    dig_questions = build_dig_questions(claims)
+    coverage = match_coverage(analysis.get("requirements", []))
+    ats_checks = check_ats(resume_text, jd_text, coverage)
+    ats_score = score_ats(resume_text)
     result: dict[str, Any] = {
         "analysis": analysis,
         "fact_ledger": fact_ledger,
+        "claims": claims,
+        "claim_errors": claim_errors,
+        "interview_defense": interview_defense,
+        "defense_errors": defense_errors,
+        "dig_questions": dig_questions,
+        "match_coverage": coverage,
+        "ats_checks": ats_checks,
+        "ats_score": ats_score["score"],
         "confirmation_questions": analysis["confirmation_questions"],
     }
     if llm_raw is None:
@@ -71,6 +129,8 @@ def run_python_workflow(
         })
     violations = validate_resume_draft(final_resume)
     violations.extend(validate_resume_evidence(resume_text, final_resume))
+    # 角色门禁：最终稿的角色等级不得高于原文证据（只允许降级）
+    violations.extend(check_role_downgrade(final_resume, claims))
     if violations:
         raise ValueError("最终简历触发真实性门禁：" + "、".join(violations))
     result["final_resume"] = final_resume
