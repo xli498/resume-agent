@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import secrets
 import threading
@@ -154,6 +155,16 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(pdf_bytes)
             return
+        if path.startswith("/api/tasks/"):
+            task_id = path.rsplit("/", 1)[-1]
+            with TASKS_LOCK:
+                _prune_tasks_locked()
+                task = TASKS.get(task_id)
+            if not task:
+                _json(self, {"error": "任务不存在"}, HTTPStatus.NOT_FOUND)
+            else:
+                _json(self, _public_task(task))
+            return
         if path in ("/", "/resume", "/resume/"):
             body = INDEX_HTML.encode("utf-8")
             self.send_response(HTTPStatus.OK)
@@ -165,6 +176,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def _body(self) -> dict:
+        if self.headers.get_content_type() != "application/json":
+            raise ValueError("请求必须使用 application/json")
         length = int(self.headers.get("Content-Length", 0) or 0)
         if not length:
             raise ValueError("请求体不能为空")
@@ -255,9 +268,30 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, {"error": "服务器内部错误"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
 
+def _public_task(task: dict) -> dict:
+    return {key: value for key, value in task.items() if key not in {"resume", "jd", "created_at"}}
+
+
+def _require_loopback(host: str) -> None:
+    try:
+        if not ipaddress.ip_address(host).is_loopback:
+            raise ValueError
+    except ValueError as error:
+        raise ValueError("本地 MVP 仅允许绑定 127.0.0.1 或 ::1") from error
+
+
+def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
+    _require_loopback(host)
+    server = ThreadingHTTPServer((host, port), Handler)
+    print(f"Resume Agent 已启动：http://{host}:{port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
 def main() -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
-    server.serve_forever()
+    serve()
 
 
 if __name__ == "__main__":
