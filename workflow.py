@@ -18,6 +18,11 @@ from main import (
     validate_resume_draft,
     validate_resume_evidence,
 )
+from claim_ledger import (
+    build_interview_defense,
+    check_role_downgrade,
+    extract_atomic_claims,
+)
 
 
 class ResumeWorkflowState(TypedDict, total=False):
@@ -28,6 +33,8 @@ class ResumeWorkflowState(TypedDict, total=False):
     final_resume: str
     violations: list[str]
     fact_ledger: list[dict[str, Any]]
+    claims: list[dict[str, Any]]
+    interview_defense: list[dict[str, Any]]
     accepted_revisions: list[dict[str, Any]]
     rejected_revisions: list[str]
     confirmation_questions: list[dict[str, Any]]
@@ -47,9 +54,14 @@ def run_python_workflow(
     analysis = build_analysis(resume_text, jd_text, finance_mode=finance_mode)
     fact_ledger = build_fact_ledger(resume_text)
     analysis["fact_ledger"] = fact_ledger
+    # Claim Ledger 原子事实层 + 面试防御（学自 sushen-resume-maker）
+    claims = extract_atomic_claims(resume_text)
+    interview_defense = build_interview_defense(claims)
     result: dict[str, Any] = {
         "analysis": analysis,
         "fact_ledger": fact_ledger,
+        "claims": claims,
+        "interview_defense": interview_defense,
         "confirmation_questions": analysis["confirmation_questions"],
     }
     if llm_raw is None:
@@ -71,6 +83,8 @@ def run_python_workflow(
         })
     violations = validate_resume_draft(final_resume)
     violations.extend(validate_resume_evidence(resume_text, final_resume))
+    # 角色门禁：最终稿的角色等级不得高于原文证据（只允许降级）
+    violations.extend(check_role_downgrade(final_resume, claims))
     if violations:
         raise ValueError("最终简历触发真实性门禁：" + "、".join(violations))
     result["final_resume"] = final_resume
