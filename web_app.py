@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from workflow import apply_dig_answers, run_python_workflow
+from pdf_export import render_pdf
 
 
 TASKS: dict[str, dict] = {}
@@ -95,19 +96,20 @@ button:disabled{opacity:.5;cursor:not-allowed}
 <h3>📋 事实账本</h3><div id="facts" class="facts"></div>
 <h3>❓ 待确认问题</h3><div id="questions"></div>
 <h3>🛡️ 面试防御</h3><div id="defense"></div>
-<h3>🔍 深挖</h3><div id="dig"></div>
+<h3>🔍 深挖</h3><div id="dig"></div><h3>✅ ATS 检查</h3><div id="ats"></div>
 <div class="actions"><button id="submitDig" class="secondary hidden">提交深挖回答</button><button id="generate" disabled>确认事实并生成</button></div>
 <p class="hint">确认即表示认可当前事实账本；待确认问题不会被擅自补写进简历。</p></div>
 <div id="resultCard" class="card wide hidden"><h2><span class="n">3</span>结果与交付</h2><div id="resultMeta" class="metrics"></div><pre id="result" class="result"></pre>
-<div class="actions"><button id="download" class="secondary">下载 Markdown</button></div></div>
+<div class="actions"><button id="download" class="secondary">下载 Markdown</button><button id="downloadPdf" class="secondary">下载 PDF</button></div></div>
 </section></main>
 <script>
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let taskId=null,finalResume='';
-$('analyze').onclick=async()=>{const resume=$('resume').value.trim(),jd=$('jd').value.trim();if(!resume||!jd){$('status').textContent='请先填写简历和 JD';$('status').className='status warn';return}$('analyze').disabled=true;$('status').textContent='分析中…';try{const r=await fetch('api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({resume,jd,job_title:$('title').value.trim(),finance_mode:$('finance').checked?true:null})});const d=await r.json();if(!r.ok)throw Error(d.error||'分析失败');taskId=d.task_id;const a=d.analysis;const finBadge=a.finance_mode?'<span class="metric">🏦 金融模式 <b>已开启</b></span>':'';const cov=d.match_coverage?`<span class="metric">匹配覆盖率 <b>${d.match_coverage.weighted_coverage}%</b></span>`:'';$('metrics').innerHTML=finBadge+cov+`<span class="metric">岗位要求 <b>${a.requirements.length}</b></span><span class="metric">事实 <b>${d.fact_ledger.length}</b></span><span class="metric">待确认 <b>${a.confirmation_questions.length}</b></span>`;$('facts').innerHTML=d.fact_ledger.map(f=>`<div class="fact"><b>${esc(f.fact_id)} · ${esc(f.section)}</b>${esc(f.text)}</div>`).join('')||'<span class="hint">未解析到事实</span>';$('questions').innerHTML=a.confirmation_questions.map(q=>`<div class="question"><b>${esc(q.category||'待确认')}</b>：${esc(q.question||q.text||'')}</div>`).join('')||'<span class="status ok">当前没有待确认问题</span>';$('defense').innerHTML=(d.interview_defense||[]).map(x=>`<div class="question"><b>${esc(x.claim_id)}</b> ${esc(x.claim_text)}${x.questions.map(q=>`<br>❓ ${esc(q.question)}<br><span class="hint">追问：${esc(q.followups.join(' / '))}<br>边界：${esc(q.boundary)}</span>`).join('')}</div>`).join('')||'<span class="hint">无强表述，无需防御</span>';window._digQs=d.dig_questions||[];$('dig').innerHTML=(d.dig_questions||[]).map(q=>`<div class="question"><b>${esc(q.question_id)} · ${esc(q.dimension)}</b>：${esc(q.question)}<br><textarea id="dig_${esc(q.question_id)}" rows="2" style="width:100%;margin-top:6px" placeholder="写下你的回答（具体事实，不要编）"></textarea></div>`).join('')||'<span class="hint">暂无深挖问题</span>';if((d.dig_questions||[]).length)$('submitDig').classList.remove('hidden');$('analysisCard').classList.remove('hidden');$('generate').disabled=false;$('status').textContent='分析完成';$('status').className='status ok';$('analysisCard').scrollIntoView({behavior:'smooth',block:'start'})}catch(e){$('status').textContent=e.message;$('status').className='status warn'}finally{$('analyze').disabled=false}};
+$('analyze').onclick=async()=>{const resume=$('resume').value.trim(),jd=$('jd').value.trim();if(!resume||!jd){$('status').textContent='请先填写简历和 JD';$('status').className='status warn';return}$('analyze').disabled=true;$('status').textContent='分析中…';try{const r=await fetch('api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({resume,jd,job_title:$('title').value.trim(),finance_mode:$('finance').checked?true:null})});const d=await r.json();if(!r.ok)throw Error(d.error||'分析失败');taskId=d.task_id;const a=d.analysis;const finBadge=a.finance_mode?'<span class="metric">🏦 金融模式 <b>已开启</b></span>':'';const cov=d.match_coverage?`<span class="metric">匹配覆盖率 <b>${d.match_coverage.weighted_coverage}%</b></span>`:'';$('metrics').innerHTML=finBadge+cov+`<span class="metric">岗位要求 <b>${a.requirements.length}</b></span><span class="metric">事实 <b>${d.fact_ledger.length}</b></span><span class="metric">待确认 <b>${a.confirmation_questions.length}</b></span>`;$('facts').innerHTML=d.fact_ledger.map(f=>`<div class="fact"><b>${esc(f.fact_id)} · ${esc(f.section)}</b>${esc(f.text)}</div>`).join('')||'<span class="hint">未解析到事实</span>';$('questions').innerHTML=a.confirmation_questions.map(q=>`<div class="question"><b>${esc(q.category||'待确认')}</b>：${esc(q.question||q.text||'')}</div>`).join('')||'<span class="status ok">当前没有待确认问题</span>';$('defense').innerHTML=(d.interview_defense||[]).map(x=>`<div class="question"><b>${esc(x.claim_id)}</b> ${esc(x.claim_text)}${x.questions.map(q=>`<br>❓ ${esc(q.question)}<br><span class="hint">追问：${esc(q.followups.join(' / '))}<br>边界：${esc(q.boundary)}</span>`).join('')}</div>`).join('')||'<span class="hint">无强表述，无需防御</span>';window._digQs=d.dig_questions||[];$('dig').innerHTML=(d.dig_questions||[]).map(q=>`<div class="question"><b>${esc(q.question_id)} · ${esc(q.dimension)}</b>：${esc(q.question)}<br><textarea id="dig_${esc(q.question_id)}" rows="2" style="width:100%;margin-top:6px" placeholder="写下你的回答（具体事实，不要编）"></textarea></div>`).join('')||'<span class="hint">暂无深挖问题</span>';$('ats').innerHTML=(d.ats_checks||[]).map(c=>`<div class="question" style="border-left-color:${c.status==='pass'?'var(--ok)':c.status==='warn'?'var(--warn)':'var(--err)'}"><b>${esc(c.check)}</b>：${esc(c.detail)}</div>`).join('');if((d.dig_questions||[]).length)$('submitDig').classList.remove('hidden');$('analysisCard').classList.remove('hidden');$('generate').disabled=false;$('status').textContent='分析完成';$('status').className='status ok';$('analysisCard').scrollIntoView({behavior:'smooth',block:'start'})}catch(e){$('status').textContent=e.message;$('status').className='status warn'}finally{$('analyze').disabled=false}};
 $('submitDig').onclick=async()=>{if(!taskId)return;const answers=(window._digQs||[]).map(q=>({question_id:q.question_id,claim_id:q.claim_id,answer:($('dig_'+q.question_id)||{}).value||''})).filter(a=>a.answer.trim());if(!answers.length){$('status').textContent='请先填写至少一个回答';$('status').className='status warn';return}$('submitDig').disabled=true;$('status').textContent='深挖中…';try{const r=await fetch('api/dig',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id:taskId,answers})});const d=await r.json();if(!r.ok)throw Error(d.error||'深挖失败');$('status').textContent='深挖完成，新增 '+d.added+' 条事实';$('status').className='status ok';$('defense').innerHTML=(d.interview_defense||[]).map(x=>`<div class="question"><b>${esc(x.claim_id)}</b> ${esc(x.claim_text)}${x.questions.map(q=>`<br>❓ ${esc(q.question)}`).join('')}</div>`).join('')}catch(e){$('status').textContent=e.message;$('status').className='status warn'}finally{$('submitDig').disabled=false}};
 $('generate').onclick=async()=>{if(!taskId)return;$('generate').disabled=true;$('status').textContent='生成与真实性校验中…';try{const r=await fetch('api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id:taskId})});const d=await r.json();if(!r.ok)throw Error(d.error||'生成失败');finalResume=d.final_resume;$('result').textContent=finalResume;$('resultMeta').innerHTML='<span class="metric">状态 <b>QA 前置校验通过</b></span><span class="metric">任务 <b>'+esc(taskId)+'</b></span>';$('resultCard').classList.remove('hidden');$('status').textContent='生成完成';$('status').className='status ok';$('resultCard').scrollIntoView({behavior:'smooth',block:'start'})}catch(e){$('status').textContent=e.message;$('status').className='status warn'}finally{$('generate').disabled=false}};
+$('downloadPdf').onclick=()=>{if(!taskId)return;const a=document.createElement('a');a.href='api/pdf?task_id='+encodeURIComponent(taskId);a.download='resume.pdf';a.click()};
 $('download').onclick=()=>{if(!finalResume)return;const b=new Blob([finalResume],{type:'text/markdown'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='resume.md';a.click()};
 </script>
 </body></html>
@@ -134,7 +136,24 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):  # noqa: N802
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == "/api/pdf":
+            q = parse_qs(parsed.query)
+            task_id = str((q.get("task_id") or [""])[0])
+            with TASKS_LOCK:
+                _prune_tasks_locked()
+                task = TASKS.get(task_id)
+                pdf_bytes = render_pdf(task["final_resume"]) if task and task.get("final_resume") else None
+            if not pdf_bytes:
+                _json(self, {"error": "任务不存在或未生成"}, HTTPStatus.NOT_FOUND); return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Disposition", "attachment; filename=resume.pdf")
+            self.send_header("Content-Length", str(len(pdf_bytes)))
+            self.end_headers()
+            self.wfile.write(pdf_bytes)
+            return
         if path in ("/", "/resume", "/resume/"):
             body = INDEX_HTML.encode("utf-8")
             self.send_response(HTTPStatus.OK)
@@ -175,7 +194,7 @@ class Handler(BaseHTTPRequestHandler):
                         oldest = min(TASKS, key=lambda key: TASKS[key]["created_at"])
                         TASKS.pop(oldest, None)
                     TASKS[task_id] = task
-                _json(self, {"task_id": task_id, "status": task["status"], "analysis": result["analysis"], "fact_ledger": result["fact_ledger"], "interview_defense": result["interview_defense"], "dig_questions": result["dig_questions"], "match_coverage": result["match_coverage"]})
+                _json(self, {"task_id": task_id, "status": task["status"], "analysis": result["analysis"], "fact_ledger": result["fact_ledger"], "interview_defense": result["interview_defense"], "dig_questions": result["dig_questions"], "match_coverage": result["match_coverage"], "ats_checks": result["ats_checks"]})
                 return
             if path == "/api/dig":
                 task_id = str(data.get("task_id", ""))
@@ -195,6 +214,21 @@ class Handler(BaseHTTPRequestHandler):
                 if response is None:
                     _json(self, {"error": "任务不存在"}, HTTPStatus.NOT_FOUND); return
                 _json(self, response)
+                return
+            if path == "/api/pdf":
+                task_id = str(data.get("task_id", ""))
+                with TASKS_LOCK:
+                    _prune_tasks_locked()
+                    task = TASKS.get(task_id)
+                    pdf_bytes = render_pdf(task["final_resume"]) if task and task.get("final_resume") else None
+                if not pdf_bytes:
+                    _json(self, {"error": "任务不存在或未生成"}, HTTPStatus.NOT_FOUND); return
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/pdf")
+                self.send_header("Content-Disposition", "attachment; filename=resume.pdf")
+                self.send_header("Content-Length", str(len(pdf_bytes)))
+                self.end_headers()
+                self.wfile.write(pdf_bytes)
                 return
             if path == "/api/generate":
                 task_id = str(data.get("task_id", ""))
