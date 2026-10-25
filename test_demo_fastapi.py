@@ -136,8 +136,8 @@ class DemoFastAPITests(unittest.TestCase):
 
     @unittest.skipUnless(
         __import__("pathlib").Path("/opt/demo/resume/fonts").is_dir(),
-        "PDF 渲染依赖服务器字体目录 /opt/demo/resume/fonts（本机无此目录，"
-        "且任务禁动 /opt/demo，故跳过；端点接线由 404 测试覆盖）",
+        "PDF 渲染依赖字体目录 /opt/demo/resume/fonts（未补齐时跳过；"
+        "补齐办法见 scripts/setup_local_fonts.py）",
     )
     def test_pdf_after_generate(self):
         self._post("/api/generate", {"task_id": self.task_id})

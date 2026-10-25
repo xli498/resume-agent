@@ -185,7 +185,7 @@ python3 -m unittest -q
 | `POST /api/analyze` | 分析简历 + JD，建事实账本与 Claim Ledger（落盘会话 + 账本） |
 | `POST /api/dig` | 提交深挖回答，转新 Claim（落盘拷打记录）；question_id 不在任务问题池时返回 400 且不入库、不生成 Claim（问题池为空的任务提交任何 ID 也返回 400） |
 | `POST /api/generate` | 确认事实并生成（单次状态迁移，二次调用 409） |
-| `POST /api/pdf` / `GET /api/pdf?task_id=` | 导出 PDF（渲染依赖服务器字体目录，见下） |
+| `POST /api/pdf` / `GET /api/pdf?task_id=` | 导出 PDF（渲染依赖字体目录，本机用 `scripts/setup_local_fonts.py` 补齐，见下） |
 | `GET /api/tasks/{task_id}` | 查任务（不返回简历/JD 原文） |
 | `POST /api/agent_dig` | LangChain 多轮 Agent 拷打：Thought→Action→Observation，轮次日志可查；未匹配回答列入 ignored，停止原因见 stopped_reason（问题池每快照最多 max_q=3 个不同问题，max_rounds>3 也可能提前停止） |
 | `GET /api/store/{task_id}` | 查 SQLite 落盘的剥离视图：会话元数据 + claim_id + 结构化 risk_flags + 轮次元数据与计数（claim 全文与问答原文只存库内，接口不返回） |
@@ -193,8 +193,9 @@ python3 -m unittest -q
 本地启动（venv 在 `~/workspace/venvs/demo-resume`，不往系统装包）：
 
 ```bash
-~/workspace/venvs/demo-resume/bin/python -m pip install "Pillow>=10,<12" "reportlab>=4,<5" "PyMuPDF>=1.24,<2" fastapi uvicorn httpx langchain-core
+~/workspace/venvs/demo-resume/bin/python -m pip install "Pillow>=10,<12" "reportlab>=4,<5" "PyMuPDF>=1.24,<2" fonttools fastapi uvicorn httpx langchain-core
 cd ~/workspace/repos/resume-agent
+python3 scripts/setup_local_fonts.py  # 本机补齐 /opt/demo/resume/fonts（见下，VM 换机后重跑即可恢复）
 ~/workspace/venvs/demo-resume/bin/python api_fastapi.py  # http://127.0.0.1:8771
 ```
 
@@ -226,11 +227,17 @@ risk_flags 结构化返回、连续分析→深挖不丢账本（均有测试覆
 语义不同（后者是“回答的 ID 未被本轮问出”，仍返回 200 明列）。
 
 注意：PDF 渲染硬编码字体目录 `/opt/demo/resume/fonts`（服务器部署路径），
-本机无此目录时 PDF 端点不可用，属既有部署耦合，本分支不改。
-本轮实测：本机 analyze→generate 均 200，但 `/api/pdf` GET/POST 均返回 500
-（render_pdf 因缺 NotoSansSC 字体文件抛错）；渲染逻辑本身经诊断确认可用
-（仅在内存中把字体指向系统 Noto Sans CJK 即可正常渲染出中文），
-缺口只在字体文件不在服务器目录，不在渲染逻辑。
+本分支不改 pdf_export.py，改在本机把字体补齐：`scripts/setup_local_fonts.py`
+从系统 Noto Sans CJK TTC 中精确提取 SC 面（排除 JP/KR/TC/HK 与 Mono 面），
+存为 `NotoSansSC-Regular.otf` 与 `NotoSansSC-Bold.otf`（render_pdf 走 buffer，
+不认扩展名）。本轮实测（适用范围：本机补齐字体后）：analyze→深挖→generate
+→`/api/pdf` GET 与 POST 均返回 200、Content-Type 为 application/pdf、单页、
+约 36KB，PyMuPDF 解析与 verify_pdf 均通过，7 个关键短语抽查全中、无替换字符。
+恢复办法：`/opt/demo` 不随仓库走、VM 换机后会丢，换机后重跑本脚本即可恢复
+（删字体目录→重跑脚本→`/api/pdf` 恢复 200，已实测）；另需 venv 内装 fonttools
+才走子集化路径（否则回退为全字体嵌入，约 34MB 且个别汉字可能出兼容字形变体，
+如“年”变体；子集化后提取干净，上述抽查全中）。线上服务在腾讯云服务器上，
+不在本机，本机补齐不影响线上。
 
 ## 许可证
 
