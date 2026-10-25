@@ -12,6 +12,7 @@ dist/
 output/
 outputs/
 *.log
+*.db
 
 # Local/private inputs (use examples/ for public fixtures)
 input/resume.txt

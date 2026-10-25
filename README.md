@@ -172,6 +172,49 @@ python3 -m unittest -q
 
 公开前请同时检查当前工作树、暂存区和 Git 历史；`.gitignore` 只能阻止未跟踪文件进入后续提交，不能从既有提交历史中删除已经提交过的内容。
 
+## Demo：FastAPI 接口层（demo/fastapi 分支，寒假 Demo 主作品）
+
+标准库 `web_app.py` 不动；本层是新增的 `api_fastapi.py`，端点与原服务一一对应，
+另加健康检查、Agent 拷打与落盘查询。核心判定（主张账本 / ATS 三档评分 / PDF）
+全部调用原函数；安全机制（loopback 绑定、Content-Type 校验、任务查询剥离原文）
+与 PR #4 原样一致。
+
+| 端点 | 作用 |
+|---|---|
+| `GET /api/health` | 健康检查 |
+| `POST /api/analyze` | 分析简历 + JD，建事实账本与 Claim Ledger（落盘会话 + 账本） |
+| `POST /api/dig` | 提交深挖回答，转新 Claim（落盘拷打记录） |
+| `POST /api/generate` | 确认事实并生成（单次状态迁移，二次调用 409） |
+| `POST /api/pdf` / `GET /api/pdf?task_id=` | 导出 PDF（渲染依赖服务器字体目录，见下） |
+| `GET /api/tasks/{task_id}` | 查任务（不返回简历/JD 原文） |
+| `POST /api/agent_dig` | LangChain 多轮 Agent 拷打：Thought→Action→Observation，轮次日志可查 |
+| `GET /api/store/{task_id}` | 查 SQLite 落盘：会话 + 账本 + 拷打记录 |
+
+本地启动（venv 在 `~/workspace/venvs/demo-resume`，不往系统装包）：
+
+```bash
+~/workspace/venvs/demo-resume/bin/python -m pip install "Pillow>=10,<12" "reportlab>=4,<5" "PyMuPDF>=1.24,<2" fastapi uvicorn httpx langchain-core
+cd ~/workspace/repos/resume-agent
+~/workspace/venvs/demo-resume/bin/python api_fastapi.py  # http://127.0.0.1:8771
+```
+
+curl 示例（虚构数据）：
+
+```bash
+curl -s localhost:8771/api/health
+curl -s -X POST localhost:8771/api/analyze -H 'Content-Type: application/json' \
+  -d '{"resume": "张三\n工作经历\n某公司", "jd": "岗位要求：数据分析"}'
+```
+
+持久化：SQLite（标准库 `store.py`），默认 `output/resume_agent.db`，
+可用 `RESUME_AGENT_DB` 环境变量改路径；`*.db` 已入 `.gitignore`。
+Agent 循环：无 `API_BASE_URL` / `API_KEY` / `MODEL` 时走规则回退，
+响应里 `llm_used=false`、`mode=rule_fallback`，不假装调过模型；
+轮次日志见 `output/agent_dig.jsonl`（只记 question_id/mode/added，不记原文与回答）。
+
+注意：PDF 渲染硬编码字体目录 `/opt/demo/resume/fonts`（服务器部署路径），
+本机无此目录时 PDF 端点不可用，属既有部署耦合，本分支不改。
+
 ## 许可证
 
 MIT License，见 `LICENSE`。
