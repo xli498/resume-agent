@@ -187,8 +187,8 @@ python3 -m unittest -q
 | `POST /api/generate` | 确认事实并生成（单次状态迁移，二次调用 409） |
 | `POST /api/pdf` / `GET /api/pdf?task_id=` | 导出 PDF（渲染依赖服务器字体目录，见下） |
 | `GET /api/tasks/{task_id}` | 查任务（不返回简历/JD 原文） |
-| `POST /api/agent_dig` | LangChain 多轮 Agent 拷打：Thought→Action→Observation，轮次日志可查 |
-| `GET /api/store/{task_id}` | 查 SQLite 落盘：会话 + 账本 + 拷打记录 |
+| `POST /api/agent_dig` | LangChain 多轮 Agent 拷打：Thought→Action→Observation，轮次日志可查；未匹配回答列入 ignored，停止原因见 stopped_reason（问题池每快照最多 max_q=3 个不同问题，max_rounds>3 也可能提前停止） |
+| `GET /api/store/{task_id}` | 查 SQLite 落盘的剥离视图：会话元数据 + claim_id + 结构化 risk_flags + 轮次元数据与计数（claim 全文与问答原文只存库内，接口不返回） |
 
 本地启动（venv 在 `~/workspace/venvs/demo-resume`，不往系统装包）：
 
@@ -208,9 +208,18 @@ curl -s -X POST localhost:8771/api/analyze -H 'Content-Type: application/json' \
 
 持久化：SQLite（标准库 `store.py`），默认 `output/resume_agent.db`，
 可用 `RESUME_AGENT_DB` 环境变量改路径；`*.db` 已入 `.gitignore`。
+拷打记录库内存全文（question/answer 全文保真），接口查询时剥离原文；
+账本查询返回的 `risk_flags` 为结构化列表（库内原串为 JSON 文本）。
 Agent 循环：无 `API_BASE_URL` / `API_KEY` / `MODEL` 时走规则回退，
 响应里 `llm_used=false`、`mode=rule_fallback`，不假装调过模型；
-轮次日志见 `output/agent_dig.jsonl`（只记 question_id/mode/added，不记原文与回答）。
+轮次日志路径可用 `RESUME_AGENT_DIG_LOG` 覆盖，默认 `output/agent_dig.jsonl`
+（只记 question_id/mode/answered/added，不记原文与回答）。
+请求体校验与原服务一致：Content-Type 必须为 application/json、体不能为空、
+不得超过 2MB、必须是 JSON 对象，畸形 JSON 统一返回 400（不用 FastAPI 默认 422）。
+
+本轮已修（P1 全修轮）：2MB 上限与畸形 JSON 400、store 接口剥离原文、
+拷打记录库内保真、未匹配回答明列 ignored 与 stopped_reason、测试日志走临时路径、
+risk_flags 结构化返回、连续分析→深挖不丢账本（均有测试覆盖）。
 
 注意：PDF 渲染硬编码字体目录 `/opt/demo/resume/fonts`（服务器部署路径），
 本机无此目录时 PDF 端点不可用，属既有部署耦合，本分支不改。

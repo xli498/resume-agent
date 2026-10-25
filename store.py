@@ -54,11 +54,21 @@ CREATE TABLE IF NOT EXISTS dig_records (
 
 
 def init_db(path: Path | None = None) -> Path:
-    """建库建表（幂等）。返回实际库路径。"""
+    """建库建表（幂等）。返回实际库路径。
+
+    老库迁移：dig_records 若缺 answered/added 列则 ALTER 补齐，
+    这样旧库文件也能跑新代码，不丢已有记录。
+    """
     db = Path(path) if path is not None else default_db_path()
     db.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db) as conn:
         conn.executescript(_SCHEMA)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(dig_records)")}
+        for col in ("answered", "added"):
+            if col not in cols:
+                conn.execute(
+                    f"ALTER TABLE dig_records ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
+                )
     return db
 
 
@@ -122,15 +132,17 @@ def save_dig(
             )
         for qa in qa_pairs:
             conn.execute(
-                "INSERT INTO dig_records(task_id, round_no, question_id, question, answer, mode, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO dig_records(task_id, round_no, question_id, question, answer, mode, answered, added, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     task_id,
                     0,
                     str(qa.get("question_id", "")),
-                    "",
+                    str(qa.get("question", "")),
                     str(qa.get("answer", "")),
                     "user_answer",
+                    1 if str(qa.get("answer", "")).strip() else 0,
+                    0,
                     time.time(),
                 ),
             )
@@ -141,19 +153,26 @@ def save_agent_rounds(
     rounds: list[dict[str, Any]],
     path: Path | None = None,
 ) -> None:
-    """Agent 多轮循环的每一轮记一条记录（question/answer 均可为空=待回答）。"""
+    """Agent 多轮循环的每一轮记一条记录。
+
+    库内存全文保真：question 存最终问题、answered 记是否提供了回答、
+    added 记本轮新增 Claim 数；回答原文不记（只记是否提供），
+    接口层另行剥离 question/answer，库内存与接口不返配合。
+    """
     with _connect(path) as conn:
         for rnd in rounds:
             conn.execute(
-                "INSERT INTO dig_records(task_id, round_no, question_id, question, answer, mode, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO dig_records(task_id, round_no, question_id, question, answer, mode, answered, added, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     task_id,
                     int(rnd.get("round", 0)),
                     str(rnd.get("question_id", "")),
                     str(rnd.get("question", "")),
-                    str(rnd.get("answer", "") or ""),
+                    "",
                     str(rnd.get("mode", "")),
+                    1 if rnd.get("answered") else 0,
+                    int(rnd.get("added", 0)),
                     time.time(),
                 ),
             )
@@ -189,7 +208,7 @@ def get_session(task_id: str, path: Path | None = None) -> dict[str, Any] | None
         records = [
             dict(r)
             for r in conn.execute(
-                "SELECT round_no, question_id, question, answer, mode FROM dig_records"
+                "SELECT round_no, question_id, question, answer, mode, answered, added FROM dig_records"
                 " WHERE task_id = ? ORDER BY id",
                 (task_id,),
             )

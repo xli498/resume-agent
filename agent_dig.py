@@ -14,7 +14,12 @@
 原问题），并在每轮记录 mode=rule_fallback、llm_used=False。报告里必须如实写
 "未验证 LLM 真调用"，不许把回退结果说成模型输出。
 
-隐私：JSONL 日志只记 question_id、mode、added 数量，不记简历原文与回答正文。
+隐私：JSONL 日志只记 question_id、mode、answered、added 数量，不记简历原文与回答正文。
+日志路径可用环境变量 RESUME_AGENT_DIG_LOG 覆盖，默认 output/agent_dig.jsonl。
+诚实性补充：未匹配本轮问出 question_id 的回答列入 ignored，不静默丢弃；
+停止原因 stopped_reason 区分问题池耗尽（question_pool_exhausted，
+build_dig_questions 每快照最多出 max_q=3 个不同问题，故 max_rounds>3
+也可能提前停止）与跑满轮次（max_rounds_reached）。
 """
 from __future__ import annotations
 
@@ -133,12 +138,22 @@ def run_agent_dig(
     max_rounds: int = 3,
     task_id: str | None = None,
 ) -> dict[str, Any]:
-    """多轮 Agent 拷打循环。返回 rounds（每轮 Thought/Action/Observation）与最终状态。"""
+    """多轮 Agent 拷打循环。返回 rounds（每轮 Thought/Action/Observation）与最终状态。
+
+    诚实性补充（R5）：本轮问出过的 question_id 集合记为 asked；
+    提供了回答但 question_id 从未被本轮问出的，列入 ignored（不静默丢弃）。
+    停止原因 stopped_reason：question_pool_exhausted（问题池耗尽——
+    build_dig_questions 每快照最多出 max_q=3 个不同问题，故 max_rounds>3
+    也可能提前停止）或 max_rounds_reached（跑满指定轮次）。
+    每轮另记 answered（是否提供了非空回答），回答原文永不进轮次与日志。
+    """
     normalized_answers = _normalize_answers(answers)
     current: list[dict[str, Any]] = [dict(claim) for claim in claims]
     asked_keys: set[tuple[str, str]] = set()
+    asked_ids: set[str] = set()
     rounds: list[dict[str, Any]] = []
     llm_used_any = False
+    stopped_reason = "max_rounds_reached"
 
     for round_no in range(1, max(1, max_rounds) + 1):
         coverage_raw = check_coverage.invoke(
@@ -153,6 +168,7 @@ def run_agent_dig(
         )
         question = json.loads(question_raw)
         if not question:
+            stopped_reason = "question_pool_exhausted"
             rounds.append(
                 {
                     "round": round_no,
@@ -165,11 +181,13 @@ def run_agent_dig(
                     "question_id": "",
                     "question": "",
                     "answer": "",
+                    "answered": False,
                     "added": 0,
                 }
             )
             break
         asked_keys.add((question["claim_id"], question["dimension"]))
+        asked_ids.add(question["question_id"])
         claim_text = next(
             (c.get("text", "") for c in current if c.get("claim_id") == question["claim_id"]),
             "",
@@ -179,8 +197,9 @@ def run_agent_dig(
         )
         llm_used_any = llm_used_any or llm_used
         supplied = normalized_answers.get(question["question_id"])
+        answered = bool(supplied and supplied["answer"].strip())
         added = 0
-        if supplied and supplied["answer"].strip():
+        if answered:
             applied_raw = apply_answer.invoke(
                 {
                     "resume_text": resume_text,
@@ -208,10 +227,16 @@ def run_agent_dig(
                 "question_id": question["question_id"],
                 "question": final_question,
                 "answer": "",
+                "answered": answered,
                 "added": added,
             }
         )
 
+    ignored = [
+        {"question_id": qid, "reason": "该 question_id 在本轮未被问出，回答未纳入账本"}
+        for qid in normalized_answers
+        if qid not in asked_ids
+    ]
     final_defense = build_interview_defense(current)
     final_errors = validate_defense_coverage(final_defense, current)
     result: dict[str, Any] = {
@@ -221,14 +246,24 @@ def run_agent_dig(
         "llm_used": llm_used_any,
         "mode": "llm" if llm_used_any else "rule_fallback",
         "langchain_available": LANGCHAIN_AVAILABLE,
+        "ignored": ignored,
+        "stopped_reason": stopped_reason,
     }
     _append_log(task_id, result)
     return result
 
 
+def _log_path() -> Path:
+    """日志路径：环境变量 RESUME_AGENT_DIG_LOG 可覆盖，默认 output/agent_dig.jsonl。"""
+    env = os.environ.get("RESUME_AGENT_DIG_LOG", "").strip()
+    if env:
+        return Path(env)
+    return Path(__file__).parent / "output" / "agent_dig.jsonl"
+
+
 def _append_log(task_id: str | None, result: dict[str, Any]) -> None:
-    """追加 JSONL 运行日志：只记轮次、mode、added，不记原文与回答。"""
-    log_path = Path(__file__).parent / "output" / "agent_dig.jsonl"
+    """追加 JSONL 运行日志：只记轮次、mode、added、answered，不记原文与回答。"""
+    log_path = _log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(
         {
@@ -240,6 +275,7 @@ def _append_log(task_id: str | None, result: dict[str, Any]) -> None:
                     "mode": r["mode"],
                     "llm_used": r["llm_used"],
                     "question_id": r["question_id"],
+                    "answered": bool(r.get("answered")),
                     "added": r["added"],
                 }
                 for r in result["rounds"]

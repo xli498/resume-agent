@@ -12,20 +12,26 @@
   - 任务存储直接复用 web_app.TASKS / _public_task：GET /api/tasks/{id} 仍剥离
     resume、jd、created_at；绑定仍走 _require_loopback（仅 127.0.0.1/::1）。
   - POST 统一校验 Content-Type 必须为 application/json、请求体不能为空、
-    必须是 JSON 对象——与 web_app.Handler._body() 的校验一一对应。
+    请求体不得超过 2MB、必须是 JSON 对象——与 web_app.Handler._body() 的
+    校验一一对应；畸形 JSON 统一返回 400（不沿用 FastAPI 默认的 422）。
+  - 落盘查询 GET /api/store/{id} 只返回剥离后的视图：会话元数据、claim_id、
+    风险标记（结构化列表）、轮次元数据与计数；claim 全文与问答原文只存库内，
+    接口不返回（库内存、接口不返）。
   - 核心判定（claim_ledger / ATS / PDF）全部调用原函数，本层只做"接线+落盘"。
-
-持久化：分析/深挖成功后写 SQLite（store.py）。写库失败只记 stderr 日志，
-不改变请求结果——落盘是观测手段，不是新的门禁。
+  - Agent 拷打：问题池每快照最多出 max_q=3 个不同问题，故 max_rounds>3
+    也可能提前停止，响应里以 stopped_reason 明示原因；未匹配的回答列入
+    ignored，不静默丢弃。
 """
 from __future__ import annotations
 
+import json
 import secrets
 import sys
 import time
 from typing import Any
 
 from fastapi import Body, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 
 import agent_dig
@@ -41,6 +47,8 @@ from web_app import (
 )
 from workflow import apply_dig_answers, run_python_workflow
 
+MAX_BODY_BYTES = 2_000_000  # 与 web_app._body() 的 2MB 上限一致（> 上限才拒绝）
+
 
 def _persist(fn, *args, **kwargs) -> None:
     """落盘失败只记日志，不改请求结果（落盘不是门禁）。"""
@@ -53,14 +61,28 @@ def _persist(fn, *args, **kwargs) -> None:
 app = FastAPI(title="Resume Agent (FastAPI Demo Layer)")
 
 
+@app.exception_handler(RequestValidationError)
+async def _validation_error_to_400(request: Request, exc: RequestValidationError):  # noqa: ANN001,ANN201
+    """畸形 JSON 统一返回 400，不沿用 FastAPI 默认的 422。
+
+    报错正文固定，不回显请求体（防超大/敏感输入进响应）。
+    """
+    body_errors = [e for e in exc.errors() if e.get("loc", (None,))[0] == "body"]
+    message = "请求体必须是合法 JSON 对象" if body_errors else "请求参数不合法"
+    return JSONResponse({"error": message}, status_code=400)
+
+
 @app.middleware("http")
 async def _require_json_body(request: Request, call_next):  # noqa: ANN001,ANN201
-    """镜像 web_app._body() 的 Content-Type 与空体校验（仅 POST）。"""
+    """镜像 web_app._body() 的校验（仅 POST）：Content-Type、空体、2MB 上限。"""
     if request.method == "POST":
         if request.headers.get("content-type", "").split(";")[0].strip() != "application/json":
             return JSONResponse({"error": "请求必须使用 application/json"}, status_code=400)
-        if int(request.headers.get("content-length", "0") or "0") == 0:
+        body = await request.body()
+        if len(body) == 0:
             return JSONResponse({"error": "请求体不能为空"}, status_code=400)
+        if len(body) > MAX_BODY_BYTES:
+            return JSONResponse({"error": "请求体过大"}, status_code=400)
     return await call_next(request)
 
 
@@ -142,11 +164,23 @@ def dig(payload: Any = Body(...)) -> Any:
     task = _get_task(task_id)
     if not task:
         return _bad("任务不存在", 404)
+    # 保真：用任务内深挖问题池补齐 question 全文再入库；接口不返原文由 store 层剥离。
+    qmap = {
+        str(q.get("question_id", "")): str(q.get("question", ""))
+        for q in task.get("dig_questions", [])
+        if isinstance(q, dict)
+    }
+    enriched = [
+        {**qa, "question": qmap.get(str(qa.get("question_id", "")), "")}
+        if isinstance(qa, dict)
+        else qa
+        for qa in qa_pairs
+    ]
     dig_result = apply_dig_answers(task["resume"], task["claims"], qa_pairs)
     with TASKS_LOCK:
         task["claims"] = dig_result["claims"]
         task["interview_defense"] = dig_result["interview_defense"]
-    _persist(store.save_dig, task_id, dig_result["claims"], qa_pairs)
+    _persist(store.save_dig, task_id, dig_result["claims"], enriched)
     return {
         "task_id": task_id,
         "added": dig_result["added"],
@@ -246,6 +280,54 @@ def agent_dig_endpoint(payload: Any = Body(...)) -> Any:
         "llm_used": result["llm_used"],
         "mode": result["mode"],
         "langchain_available": result["langchain_available"],
+        "ignored": result["ignored"],
+        "stopped_reason": result["stopped_reason"],
+    }
+
+
+def _public_store(session: dict) -> dict:
+    """落盘查询的剥离视图（R2）：库内存全文，接口只返元数据与结构化标记。
+
+    会话只返 task_id/job_title/finance_mode/status；账本只返 claim_id、
+    origin 与解析后的 risk_flags 列表（不返 claim_text，不返 risk_flags_json
+    原串）；拷打记录只返 round_no/question_id/mode/answered/added
+    （不返 question/answer 原文）。
+    """
+    row = session.get("session", {})
+    claims = []
+    for claim in session.get("claims", []):
+        try:
+            flags = json.loads(claim.get("risk_flags_json", "[]"))
+        except (ValueError, TypeError):
+            flags = []
+        if not isinstance(flags, list):
+            flags = []
+        claims.append(
+            {
+                "claim_id": claim.get("claim_id", ""),
+                "origin": claim.get("origin", ""),
+                "risk_flags": flags,
+            }
+        )
+    records = [
+        {
+            "round_no": rec.get("round_no"),
+            "question_id": rec.get("question_id", ""),
+            "mode": rec.get("mode", ""),
+            "answered": bool(rec.get("answered")),
+            "added": rec.get("added", 0),
+        }
+        for rec in session.get("dig_records", [])
+    ]
+    return {
+        "session": {
+            "task_id": row.get("task_id", ""),
+            "job_title": row.get("job_title"),
+            "finance_mode": row.get("finance_mode"),
+            "status": row.get("status"),
+        },
+        "claims": claims,
+        "dig_records": records,
     }
 
 
@@ -254,7 +336,7 @@ def get_store(task_id: str) -> Any:
     session = store.get_session(task_id)
     if session is None:
         return _bad("会话未落盘或不存在", 404)
-    return session
+    return _public_store(session)
 
 
 def serve(host: str = "127.0.0.1", port: int = 8771) -> None:

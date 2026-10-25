@@ -33,6 +33,10 @@ class DemoFastAPITests(unittest.TestCase):
         self._db = os.path.join(self._tmp.name, "demo.db")
         self._old_db = os.environ.get("RESUME_AGENT_DB")
         os.environ["RESUME_AGENT_DB"] = self._db
+        # R4：Agent 日志改走临时路径，不再写仓库 output/agent_dig.jsonl
+        self._log = os.path.join(self._tmp.name, "agent_dig.jsonl")
+        self._old_log = os.environ.get("RESUME_AGENT_DIG_LOG")
+        os.environ["RESUME_AGENT_DIG_LOG"] = self._log
         # 强制 Agent 走规则回退：卸掉可能存在的 LLM 环境变量
         self._old_llm_env = {}
         for key in ("API_BASE_URL", "API_KEY", "MODEL"):
@@ -49,6 +53,10 @@ class DemoFastAPITests(unittest.TestCase):
             os.environ.pop("RESUME_AGENT_DB", None)
         else:
             os.environ["RESUME_AGENT_DB"] = self._old_db
+        if self._old_log is None:
+            os.environ.pop("RESUME_AGENT_DIG_LOG", None)
+        else:
+            os.environ["RESUME_AGENT_DIG_LOG"] = self._old_log
         os.environ.update(self._old_llm_env)
         self._tmp.cleanup()
         with web_app.TASKS_LOCK:
@@ -181,6 +189,151 @@ class DemoFastAPITests(unittest.TestCase):
             any(rnd["added"] >= 1 for rnd in result["rounds"]),
             f"提供回答后应新增 Claim，rounds={result['rounds']}",
         )
+
+    # ---- 本轮修复的新测试（R1/R2/R3/R5/R4/risk_flags/连续流程）----
+
+    def test_body_over_2mb_returns_400(self):
+        big = json.dumps({"resume": "x" * 2_000_001, "jd": "y"}, ensure_ascii=False)
+        response = self.client.post(
+            "/api/analyze",
+            content=big.encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_body_exactly_2mb_passes_size_check(self):
+        # 注意：不用 /api/analyze 测边界——2MB 简历会跑完整工作流，
+        # 其中 ATS 规则引擎对超大单 token 文本极慢（既有核心行为，禁动）。
+        # 改走 /api/pdf：只验中间件放行（404 = 通过了尺寸校验、任务不存在）。
+        base = json.dumps({"task_id": "nope", "pad": ""}, ensure_ascii=False)
+        pad = 2_000_000 - len(base.encode("utf-8"))
+        payload = json.dumps({"task_id": "nope", "pad": "x" * pad}, ensure_ascii=False)
+        self.assertEqual(len(payload.encode("utf-8")), 2_000_000)
+        response = self.client.post(
+            "/api/pdf",
+            content=payload.encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_malformed_json_returns_400_not_422(self):
+        response = self.client.post(
+            "/api/analyze",
+            content=b"{not json",
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_store_strips_original_text_and_structures_flags(self):
+        first_q = self.created["dig_questions"][0]
+        self._post(
+            "/api/dig",
+            {
+                "task_id": self.task_id,
+                "answers": [
+                    {
+                        "question_id": first_q["question_id"],
+                        "claim_id": first_q["claim_id"],
+                        "answer": ANSWER,
+                    }
+                ],
+            },
+        )
+        response = self.client.get(f"/api/store/{self.task_id}")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        for claim in data["claims"]:
+            self.assertNotIn("claim_text", claim)
+            self.assertNotIn("risk_flags_json", claim)
+            self.assertIsInstance(claim["risk_flags"], list)
+        for rec in data["dig_records"]:
+            self.assertNotIn("question", rec)
+            self.assertNotIn("answer", rec)
+            self.assertIn("answered", rec)
+            self.assertIn("added", rec)
+
+    def test_dig_records_keep_full_text_in_db(self):
+        first_q = self.created["dig_questions"][0]
+        self._post(
+            "/api/dig",
+            {
+                "task_id": self.task_id,
+                "answers": [
+                    {
+                        "question_id": first_q["question_id"],
+                        "claim_id": first_q["claim_id"],
+                        "answer": ANSWER,
+                    }
+                ],
+            },
+        )
+        import sqlite3
+
+        with sqlite3.connect(self._db) as conn:
+            rows = conn.execute(
+                "SELECT question, answer FROM dig_records"
+                " WHERE task_id = ? AND mode = 'user_answer'",
+                (self.task_id,),
+            ).fetchall()
+        self.assertTrue(rows, "库内无深挖记录")
+        self.assertEqual(rows[0][0], first_q["question"])
+        self.assertEqual(rows[0][1], ANSWER)
+
+    def test_agent_dig_ignored_and_stopped_reason(self):
+        status, result = self._post(
+            "/api/agent_dig",
+            {
+                "task_id": self.task_id,
+                "max_rounds": 5,
+                "answers": [
+                    {"question_id": "Q999", "claim_id": "C001", "answer": ANSWER}
+                ],
+            },
+        )
+        self.assertEqual(status, 200, result)
+        self.assertTrue(
+            any(item["question_id"] == "Q999" for item in result["ignored"]),
+            f"未匹配回答必须明列 ignored，got={result.get('ignored')}",
+        )
+        self.assertIn(
+            result["stopped_reason"],
+            ("question_pool_exhausted", "max_rounds_reached"),
+        )
+
+    def test_continuous_analyze_dig_keeps_claims(self):
+        before = self.client.get(f"/api/store/{self.task_id}").json()
+        ids_before = {c["claim_id"] for c in before["claims"]}
+        first_q = self.created["dig_questions"][0]
+        status, dig = self._post(
+            "/api/dig",
+            {
+                "task_id": self.task_id,
+                "answers": [
+                    {
+                        "question_id": first_q["question_id"],
+                        "claim_id": first_q["claim_id"],
+                        "answer": ANSWER,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(status, 200, dig)
+        after = self.client.get(f"/api/store/{self.task_id}").json()
+        ids_after = {c["claim_id"] for c in after["claims"]}
+        self.assertTrue(ids_before <= ids_after, f"深挖丢了原有 Claim：{ids_before - ids_after}")
+        self.assertGreater(len(ids_after), len(ids_before))
+
+    def test_agent_log_goes_to_env_path_not_repo(self):
+        import pathlib
+
+        repo_log = pathlib.Path(__file__).parent / "output" / "agent_dig.jsonl"
+        before = repo_log.read_bytes() if repo_log.exists() else None
+        status, _ = self._post("/api/agent_dig", {"task_id": self.task_id, "max_rounds": 1})
+        self.assertEqual(status, 200)
+        with open(self._log, encoding="utf-8") as f:
+            self.assertIn(self.task_id, f.read())
+        after = repo_log.read_bytes() if repo_log.exists() else None
+        self.assertEqual(before, after, "测试写了仓库 output/agent_dig.jsonl")
 
 
 if __name__ == "__main__":
