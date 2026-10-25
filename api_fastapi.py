@@ -164,6 +164,25 @@ def dig(payload: Any = Body(...)) -> Any:
     task = _get_task(task_id)
     if not task:
         return _bad("任务不存在", 404)
+    if not isinstance(qa_pairs, list):
+        return _bad("answers 必须是数组")
+    # 可追溯性：只接受任务问题池内的 question_id；池外 ID 拒绝入库，
+    # 不生成 claim、不静默丢弃（与 agent_dig 的 ignored 语义不同：后者处理
+    # “回答的 ID 未被本轮问出”，此处处理“ID 根本不在任务题池”）。
+    pool = {
+        str(q.get("question_id", ""))
+        for q in task.get("dig_questions", [])
+        if isinstance(q, dict)
+    }
+    bad_ids = []
+    seen_bad = set()
+    for qa in qa_pairs:
+        qid = str(qa.get("question_id", "")) if isinstance(qa, dict) else ""
+        if qid not in pool and qid not in seen_bad:
+            seen_bad.add(qid)
+            bad_ids.append(qid if qid else "(缺失)")
+    if bad_ids:
+        return _bad("question_id 不在任务问题池：" + "、".join(bad_ids))
     # 保真：用任务内深挖问题池补齐 question 全文再入库；接口不返原文由 store 层剥离。
     qmap = {
         str(q.get("question_id", "")): str(q.get("question", ""))

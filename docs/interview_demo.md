@@ -76,11 +76,18 @@
 - Agent 诚实性补齐：未匹配 question_id 的回答明列 ignored，不静默丢弃；
   停止原因 stopped_reason 区分问题池耗尽与跑满轮次（问题池每快照最多 3 个
   不同问题，max_rounds>3 也可能提前停止，这个上限语义要主动讲出来）。
+- `/api/dig` 拒绝池外 question_id：不在任务问题池的 ID 返回 400 且不入库、
+  不生成 Claim，问题池为空的任务提交任何 ID 也返回 400；与 agent_dig 的
+  ignored 不同（后者是回答的 ID 未被本轮问出，仍返回 200 明列；前者是 ID
+  根本不在任务题池），两处语义不要混为一谈。
 
 ### 仍未验证（继续保留，不冒充）
 
-- PDF 渲染硬编码服务器字体目录 `/opt/demo/resume/fonts`，本机无此目录时
-  PDF 端点不可用——这是既有部署耦合，本分支刻意没动它（动部署目录是红线），
-  已在 README 里写明；PDF 端点的接线用 404 路径测过。
+- PDF 渲染硬编码服务器字体目录 `/opt/demo/resume/fonts`，本轮实测：本机
+  analyze→generate 均 200，但 `/api/pdf` GET/POST 均返回 500（render_pdf
+  因缺 NotoSansSC 字体文件抛错）；渲染逻辑本身经诊断确认可用（仅在内存中
+  把字体指向系统 Noto Sans CJK 即可正常渲染出中文），缺口只在字体文件，
+  不在渲染逻辑。本分支刻意没动它（改 pdf_export.py、动部署目录都是红线），
+  PDF 200 真渲染仍未验证，继续保留为短板。
 - Agent 循环的 LLM 真调用尚未验证（本地无密钥），演示时讲规则回退路径；
   有密钥的环境一换就能走 LLM 分支，代码路径同一条。

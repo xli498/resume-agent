@@ -183,7 +183,7 @@ python3 -m unittest -q
 |---|---|
 | `GET /api/health` | 健康检查 |
 | `POST /api/analyze` | 分析简历 + JD，建事实账本与 Claim Ledger（落盘会话 + 账本） |
-| `POST /api/dig` | 提交深挖回答，转新 Claim（落盘拷打记录） |
+| `POST /api/dig` | 提交深挖回答，转新 Claim（落盘拷打记录）；question_id 不在任务问题池时返回 400 且不入库、不生成 Claim（问题池为空的任务提交任何 ID 也返回 400） |
 | `POST /api/generate` | 确认事实并生成（单次状态迁移，二次调用 409） |
 | `POST /api/pdf` / `GET /api/pdf?task_id=` | 导出 PDF（渲染依赖服务器字体目录，见下） |
 | `GET /api/tasks/{task_id}` | 查任务（不返回简历/JD 原文） |
@@ -221,8 +221,16 @@ Agent 循环：无 `API_BASE_URL` / `API_KEY` / `MODEL` 时走规则回退，
 拷打记录库内保真、未匹配回答明列 ignored 与 stopped_reason、测试日志走临时路径、
 risk_flags 结构化返回、连续分析→深挖不丢账本（均有测试覆盖）。
 
+本轮已修（池外 ID 关闭）：`/api/dig` 拒绝任务问题池外的 question_id，
+返回 400 与明确错误信息，不入库、不生成 Claim；与 `agent_dig` 的 ignored
+语义不同（后者是“回答的 ID 未被本轮问出”，仍返回 200 明列）。
+
 注意：PDF 渲染硬编码字体目录 `/opt/demo/resume/fonts`（服务器部署路径），
 本机无此目录时 PDF 端点不可用，属既有部署耦合，本分支不改。
+本轮实测：本机 analyze→generate 均 200，但 `/api/pdf` GET/POST 均返回 500
+（render_pdf 因缺 NotoSansSC 字体文件抛错）；渲染逻辑本身经诊断确认可用
+（仅在内存中把字体指向系统 Noto Sans CJK 即可正常渲染出中文），
+缺口只在字体文件不在服务器目录，不在渲染逻辑。
 
 ## 许可证
 

@@ -300,6 +300,34 @@ class DemoFastAPITests(unittest.TestCase):
             ("question_pool_exhausted", "max_rounds_reached"),
         )
 
+    def test_mixed_pool_outside_ids_rejected_as_batch(self):
+        first_q = self.created["dig_questions"][0]
+        status, result = self._post(
+            "/api/dig",
+            {
+                "task_id": self.task_id,
+                "answers": [
+                    {
+                        "question_id": first_q["question_id"],
+                        "claim_id": first_q["claim_id"],
+                        "answer": ANSWER,
+                    },
+                    {"question_id": "Q999", "answer": ANSWER},
+                ],
+            },
+        )
+        self.assertEqual(status, 400, result)
+        self.assertIn("Q999", json.dumps(result, ensure_ascii=False))
+        import sqlite3
+
+        with sqlite3.connect(self._db) as conn:
+            rows = conn.execute(
+                "SELECT question, answer FROM dig_records"
+                " WHERE task_id = ? AND mode = 'user_answer'",
+                (self.task_id,),
+            ).fetchall()
+        self.assertEqual(rows, [], "整批拒绝时不得落盘任何记录")
+
     def test_continuous_analyze_dig_keeps_claims(self):
         before = self.client.get(f"/api/store/{self.task_id}").json()
         ids_before = {c["claim_id"] for c in before["claims"]}
@@ -334,6 +362,75 @@ class DemoFastAPITests(unittest.TestCase):
             self.assertIn(self.task_id, f.read())
         after = repo_log.read_bytes() if repo_log.exists() else None
         self.assertEqual(before, after, "测试写了仓库 output/agent_dig.jsonl")
+
+    def _dig_record_count(self, task_id):
+        import sqlite3
+
+        with sqlite3.connect(self._db) as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM dig_records WHERE task_id = ?", (task_id,)
+            ).fetchone()[0]
+
+    def _store_claim_ids(self, task_id):
+        store = self.client.get(f"/api/store/{task_id}").json()
+        return {c["claim_id"] for c in store["claims"]}
+
+    def test_dig_rejects_pool_outside_id(self):
+        records_before = self._dig_record_count(self.task_id)
+        claims_before = self._store_claim_ids(self.task_id)
+        status, result = self._post(
+            "/api/dig",
+            {
+                "task_id": self.task_id,
+                "answers": [
+                    {"question_id": "Q999", "claim_id": "C001", "answer": ANSWER}
+                ],
+            },
+        )
+        self.assertEqual(status, 400, result)
+        self.assertIn("Q999", result.get("error", ""))
+        self.assertIn("问题池", result.get("error", ""))
+        self.assertEqual(
+            self._dig_record_count(self.task_id), records_before, "池外 ID 不得入库"
+        )
+        self.assertEqual(
+            self._store_claim_ids(self.task_id), claims_before, "池外 ID 不得生成 Claim"
+        )
+
+    def test_dig_pool_inside_id_persists(self):
+        first_q = self.created["dig_questions"][0]
+        records_before = self._dig_record_count(self.task_id)
+        status, dig = self._post(
+            "/api/dig",
+            {
+                "task_id": self.task_id,
+                "answers": [
+                    {
+                        "question_id": first_q["question_id"],
+                        "claim_id": first_q["claim_id"],
+                        "answer": ANSWER,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(status, 200, dig)
+        self.assertEqual(
+            self._dig_record_count(self.task_id), records_before + 1, "池内 ID 应正常入库"
+        )
+
+    def test_dig_empty_pool_rejects_any_id(self):
+        status, created = self._post("/api/analyze", {"resume": "你好", "jd": "无"})
+        self.assertEqual(status, 200, created)
+        self.assertEqual(created["dig_questions"], [])
+        status, result = self._post(
+            "/api/dig",
+            {
+                "task_id": created["task_id"],
+                "answers": [{"question_id": "Q1", "answer": ANSWER}],
+            },
+        )
+        self.assertEqual(status, 400, result)
+        self.assertIn("问题池", result.get("error", ""))
 
 
 if __name__ == "__main__":
