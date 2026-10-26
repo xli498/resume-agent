@@ -279,18 +279,35 @@ def agent_dig_endpoint(payload: Any = Body(...)) -> Any:
         max_rounds = int(payload.get("max_rounds", 3))
     except (TypeError, ValueError):
         return _bad("max_rounds 必须是整数")
+    challenge = payload.get("challenge") is True
     result = agent_dig.run_agent_dig(
         task["resume"],
         task["claims"],
         answers=payload.get("answers"),
         max_rounds=max_rounds,
         task_id=task_id,
+        challenge=challenge,
     )
     with TASKS_LOCK:
         task["claims"] = result["claims"]
         task["interview_defense"] = build_interview_defense(result["claims"])
     _persist(store.save_dig, task_id, result["claims"], [])
     _persist(store.save_agent_rounds, task_id, result["rounds"])
+    # P1-3：质疑轮同样落盘，否则响应一过内容即不可恢复。沿用同一张表：
+    # 轮次号续主轮次往后排（不撞号），mode 加 challenge: 前缀以区分，
+    # question 文本进库（与主轮次问题同等政策），接口层仍剥离不返。
+    _persist(
+        store.save_agent_rounds,
+        task_id,
+        [
+            {
+                **rnd,
+                "round": len(result["rounds"]) + rnd["round"],
+                "mode": "challenge:" + rnd["mode"],
+            }
+            for rnd in result["challenge"]["rounds"]
+        ],
+    )
     return {
         "task_id": task_id,
         "rounds": result["rounds"],
@@ -301,6 +318,7 @@ def agent_dig_endpoint(payload: Any = Body(...)) -> Any:
         "langchain_available": result["langchain_available"],
         "ignored": result["ignored"],
         "stopped_reason": result["stopped_reason"],
+        "challenge": result["challenge"],
     }
 
 

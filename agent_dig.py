@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -131,12 +132,45 @@ def _try_llm_question(claim_text: str, dimension: str, rule_question: str) -> tu
     return rule_question, False, "rule_fallback:empty_llm_output"
 
 
+def _rule_challenge(claim_text: str) -> str:
+    """规则回退质疑：不编造细节，只追问可验证口径。"""
+    hint = claim_text[:60]
+    return f"面试官可能追问：{hint} 里的数字/结果，能否给出可验证的口径、来源或前后对比？"
+
+
+def _try_llm_challenge(claim_text: str, dimension: str) -> tuple[str, bool, str]:
+    """尝试用 LLM 生成面试官质疑。返回 (质疑, 是否用了 LLM, mode)。
+
+    失败原因只记异常类型，不记异常正文（防上游回显进日志）；
+    质疑只记录、不判定防御成败（本轮不裁决 Claim 真假）。
+    """
+    prompt = json.dumps(
+        {
+            "task": "你是面试官，针对下面这条简历事实写一个尖锐的质疑，只返回 JSON：{\"challenge\": \"...\"}",
+            "dimension": dimension,
+            "claim_hint": claim_text[:120],
+        },
+        ensure_ascii=False,
+    )
+    try:
+        raw = call_llm(prompt)
+        parsed = json.loads(raw)
+        challenge = str(parsed.get("challenge", "")).strip()
+        if challenge:
+            return challenge, True, "llm"
+    except Exception as exc:  # noqa: BLE001 - 回退路径必须接住一切调用失败
+        return _rule_challenge(claim_text), False, f"rule_fallback:{type(exc).__name__}"
+    return _rule_challenge(claim_text), False, "rule_fallback:empty_llm_output"
+
+
 def run_agent_dig(
     resume_text: str,
     claims: list[dict[str, Any]],
     answers: list[dict[str, Any]] | dict[str, str] | None = None,
     max_rounds: int = 3,
     task_id: str | None = None,
+    challenge: bool = False,
+    max_challenges: int = 2,
 ) -> dict[str, Any]:
     """多轮 Agent 拷打循环。返回 rounds（每轮 Thought/Action/Observation）与最终状态。
 
@@ -146,6 +180,10 @@ def run_agent_dig(
     build_dig_questions 每快照最多出 max_q=3 个不同问题，故 max_rounds>3
     也可能提前停止）或 max_rounds_reached（跑满指定轮次）。
     每轮另记 answered（是否提供了非空回答），回答原文永不进轮次与日志。
+    质疑轮（challenge=True 时）：主循环结束后，对仍有覆盖缺口的高风险 Claim
+    各跑一轮面试官质疑（对标多智能体辩论的反方视角），默认关闭——
+    不开启时行为与旧版完全一致；质疑只记录、不判定防御成败，轮次放在
+    result["challenge"]["rounds"]（不混入主 rounds），日志与响应均可查。
     """
     normalized_answers = _normalize_answers(answers)
     current: list[dict[str, Any]] = [dict(claim) for claim in claims]
@@ -239,6 +277,44 @@ def run_agent_dig(
     ]
     final_defense = build_interview_defense(current)
     final_errors = validate_defense_coverage(final_defense, current)
+    challenge_rounds: list[dict[str, Any]] = []
+    if challenge:
+        target_ids: list[str] = []
+        for err in final_errors:
+            m = re.match(r"高风险 Claim (\S+) 没有被面试防御覆盖", err)
+            if m and m.group(1) not in target_ids:
+                target_ids.append(m.group(1))
+        for i, cid in enumerate(target_ids[: max(0, max_challenges)], start=1):
+            claim_text = next(
+                (c.get("text", "") for c in current if c.get("claim_id") == cid),
+                "",
+            )
+            dimension = next(
+                (d for (c, d) in asked_keys if c == cid),
+                "",
+            )
+            challenge_text, c_used, c_mode = _try_llm_challenge(claim_text, dimension)
+            llm_used_any = llm_used_any or c_used
+            # P2-2：质疑依据是截断后的文本（LLM 120 字 / 规则 60 字），如实标注。
+            truncated = len(claim_text) > (120 if c_used else 60)
+            challenge_rounds.append(
+                {
+                    "round": i,
+                    "thought": f"针对高风险 Claim {cid} 的防御缺口发起质疑",
+                    "action": "challenge",
+                    "tool": "challenge",
+                    "observation": "质疑已记录，待面试准备中回应；本轮不判定防御成败",
+                    "mode": c_mode,
+                    "llm_used": c_used,
+                    "question_id": "",
+                    "question": challenge_text,
+                    "answer": "",
+                    "answered": False,
+                    "added": 0,
+                    "claim_id": cid,
+                    "input_truncated": truncated,
+                }
+            )
     result: dict[str, Any] = {
         "rounds": rounds,
         "claims": current,
@@ -248,6 +324,7 @@ def run_agent_dig(
         "langchain_available": LANGCHAIN_AVAILABLE,
         "ignored": ignored,
         "stopped_reason": stopped_reason,
+        "challenge": {"rounds": challenge_rounds, "challenged": len(challenge_rounds)},
     }
     _append_log(task_id, result)
     return result
@@ -283,6 +360,18 @@ def _append_log(task_id: str | None, result: dict[str, Any]) -> None:
             "llm_used": result["llm_used"],
             "mode": result["mode"],
             "final_claims": len(result["claims"]),
+            "challenge": {
+                "challenged": len(result.get("challenge", {}).get("rounds", [])),
+                "rounds": [
+                    {
+                        "round": r["round"],
+                        "mode": r["mode"],
+                        "llm_used": r["llm_used"],
+                        "claim_id": r.get("claim_id", ""),
+                    }
+                    for r in result.get("challenge", {}).get("rounds", [])
+                ],
+            },
         },
         ensure_ascii=False,
     )
