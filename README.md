@@ -172,6 +172,73 @@ python3 -m unittest -q
 
 公开前请同时检查当前工作树、暂存区和 Git 历史；`.gitignore` 只能阻止未跟踪文件进入后续提交，不能从既有提交历史中删除已经提交过的内容。
 
+## Demo：FastAPI 接口层（demo/fastapi 分支，寒假 Demo 主作品）
+
+标准库 `web_app.py` 不动；本层是新增的 `api_fastapi.py`，端点与原服务一一对应，
+另加健康检查、Agent 拷打与落盘查询。核心判定（主张账本 / ATS 三档评分 / PDF）
+全部调用原函数；安全机制（loopback 绑定、Content-Type 校验、任务查询剥离原文）
+与 PR #4 原样一致。
+
+| 端点 | 作用 |
+|---|---|
+| `GET /api/health` | 健康检查 |
+| `POST /api/analyze` | 分析简历 + JD，建事实账本与 Claim Ledger（落盘会话 + 账本） |
+| `POST /api/dig` | 提交深挖回答，转新 Claim（落盘拷打记录）；question_id 不在任务问题池时返回 400 且不入库、不生成 Claim（问题池为空的任务提交任何 ID 也返回 400） |
+| `POST /api/generate` | 确认事实并生成（单次状态迁移，二次调用 409） |
+| `POST /api/pdf` / `GET /api/pdf?task_id=` | 导出 PDF（渲染依赖字体目录，本机用 `scripts/setup_local_fonts.py` 补齐，见下） |
+| `GET /api/tasks/{task_id}` | 查任务（不返回简历/JD 原文） |
+| `POST /api/agent_dig` | LangChain 多轮 Agent 拷打：Thought→Action→Observation，轮次日志可查；未匹配回答列入 ignored，停止原因见 stopped_reason（问题池每快照最多 max_q=3 个不同问题，max_rounds>3 也可能提前停止） |
+| `GET /api/store/{task_id}` | 查 SQLite 落盘的剥离视图：会话元数据 + claim_id + 结构化 risk_flags + 轮次元数据与计数（claim 全文与问答原文只存库内，接口不返回） |
+
+本地启动（venv 在 `~/workspace/venvs/demo-resume`，不往系统装包）：
+
+```bash
+~/workspace/venvs/demo-resume/bin/python -m pip install "Pillow>=10,<12" "reportlab>=4,<5" "PyMuPDF>=1.24,<2" fonttools fastapi uvicorn httpx langchain-core
+cd ~/workspace/repos/resume-agent
+python3 scripts/setup_local_fonts.py  # 本机补齐 /opt/demo/resume/fonts（见下，VM 换机后重跑即可恢复）
+~/workspace/venvs/demo-resume/bin/python api_fastapi.py  # http://127.0.0.1:8771
+```
+
+curl 示例（虚构数据）：
+
+```bash
+curl -s localhost:8771/api/health
+curl -s -X POST localhost:8771/api/analyze -H 'Content-Type: application/json' \
+  -d '{"resume": "张三\n工作经历\n某公司", "jd": "岗位要求：数据分析"}'
+```
+
+持久化：SQLite（标准库 `store.py`），默认 `output/resume_agent.db`，
+可用 `RESUME_AGENT_DB` 环境变量改路径；`*.db` 已入 `.gitignore`。
+拷打记录库内存全文（question/answer 全文保真），接口查询时剥离原文；
+账本查询返回的 `risk_flags` 为结构化列表（库内原串为 JSON 文本）。
+Agent 循环：无 `API_BASE_URL` / `API_KEY` / `MODEL` 时走规则回退，
+响应里 `llm_used=false`、`mode=rule_fallback`，不假装调过模型；
+轮次日志路径可用 `RESUME_AGENT_DIG_LOG` 覆盖，默认 `output/agent_dig.jsonl`
+（只记 question_id/mode/answered/added，不记原文与回答）。
+请求体校验与原服务一致：Content-Type 必须为 application/json、体不能为空、
+不得超过 2MB、必须是 JSON 对象，畸形 JSON 统一返回 400（不用 FastAPI 默认 422）。
+
+本轮已修（P1 全修轮）：2MB 上限与畸形 JSON 400、store 接口剥离原文、
+拷打记录库内保真、未匹配回答明列 ignored 与 stopped_reason、测试日志走临时路径、
+risk_flags 结构化返回、连续分析→深挖不丢账本（均有测试覆盖）。
+
+本轮已修（池外 ID 关闭）：`/api/dig` 拒绝任务问题池外的 question_id，
+返回 400 与明确错误信息，不入库、不生成 Claim；与 `agent_dig` 的 ignored
+语义不同（后者是“回答的 ID 未被本轮问出”，仍返回 200 明列）。
+
+注意：PDF 渲染硬编码字体目录 `/opt/demo/resume/fonts`（服务器部署路径），
+本分支不改 pdf_export.py，改在本机把字体补齐：`scripts/setup_local_fonts.py`
+从系统 Noto Sans CJK TTC 中精确提取 SC 面（排除 JP/KR/TC/HK 与 Mono 面），
+存为 `NotoSansSC-Regular.otf` 与 `NotoSansSC-Bold.otf`（render_pdf 走 buffer，
+不认扩展名）。本轮实测（适用范围：本机补齐字体后）：analyze→深挖→generate
+→`/api/pdf` GET 与 POST 均返回 200、Content-Type 为 application/pdf、单页、
+约 36KB，PyMuPDF 解析与 verify_pdf 均通过，7 个关键短语抽查全中、无替换字符。
+恢复办法：`/opt/demo` 不随仓库走、VM 换机后会丢，换机后重跑本脚本即可恢复
+（删字体目录→重跑脚本→`/api/pdf` 恢复 200，已实测）；另需 venv 内装 fonttools
+才走子集化路径（否则回退为全字体嵌入，约 34MB 且个别汉字可能出兼容字形变体，
+如“年”变体；子集化后提取干净，上述抽查全中）。线上服务在腾讯云服务器上，
+不在本机，本机补齐不影响线上。
+
 ## 许可证
 
 MIT License，见 `LICENSE`。
