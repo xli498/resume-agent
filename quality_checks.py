@@ -9,9 +9,11 @@
 
 规则：
 
-``id_card``      18 位身份证号：17 位数字 + 校验位 ``[0-9Xx]``。
-``bank_card``    16–19 位连续数字串（银行卡样式），且不能是身份证号
-                 本身（与之完全重叠的数字串不再重复报 bank_card）。
+``id_card``      18 位身份证号：17 位数字 + 校验位 ``[0-9Xx]``，且校验位
+                 必须符合 GB 11643 的 mod 11 校验。
+``bank_card``    16–19 位连续数字串（银行卡样式）。只有校验通过的身份证号
+                 才不再重复报 bank_card；恰好 18 位但校验位不成立的数字串
+                 （如 18 位银行卡号）仍按 bank_card 报出。
 ``full_address`` 完整住址：省 + 市 + 区/县 + 路/街/道 + 号，从省名
                  开始、到门牌号结尾整体命中。
 
@@ -78,6 +80,16 @@ _RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("full_address", FULL_ADDRESS_PATTERN),
 )
 
+# 身份证校验位：前 17 位的加权因子与 mod 11 余数对应的校验字符。
+_ID_WEIGHTS: tuple[int, ...] = (7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2)
+_ID_CHECK_CHARS = "10X98765432"
+
+
+def _is_valid_id_card(value: str) -> bool:
+    """按 GB 11643 校验位算法判断 18 位身份证号是否成立（确定性，无 IO）。"""
+    total = sum(int(digit) * weight for digit, weight in zip(value[:17], _ID_WEIGHTS))
+    return _ID_CHECK_CHARS[total % 11] == value[17].upper()
+
 
 def scan_sensitive_info(text: str) -> list[SensitiveHit]:
     """扫描简历文本中的敏感信息，返回命中列表。
@@ -93,14 +105,21 @@ def scan_sensitive_info(text: str) -> list[SensitiveHit]:
     if not isinstance(text, str):
         raise TypeError(f"scan_sensitive_info 需要 str，收到 {type(text).__name__}")
 
-    id_spans = [m.span() for m in ID_CARD_PATTERN.finditer(text)]
+    # 只有校验位成立的身份证号才"吃掉"与之完全重叠的 bank_card 命中：
+    # 恰好 18 位但校验不成立的数字串（如 18 位银行卡号）仍按 bank_card 报。
+    valid_id_spans: set[tuple[int, int]] = set()
 
     hits: list[SensitiveHit] = []
     for rule, pattern in _RULES:
         for match in pattern.finditer(text):
             span = match.span()
-            # 身份证号本身也是 16–19 位数字串：只按 id_card 报一次，避免重复。
-            if rule == "bank_card" and span in id_spans:
+            if rule == "id_card":
+                # 形态像身份证、但校验位不成立的数字串（如 18 位银行卡号）
+                # 不报 id_card，交给 bank_card 规则处理。
+                if not _is_valid_id_card(match.group(0)):
+                    continue
+                valid_id_spans.add(span)
+            elif rule == "bank_card" and span in valid_id_spans:
                 continue
             hits.append(
                 {

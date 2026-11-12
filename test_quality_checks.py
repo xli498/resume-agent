@@ -99,13 +99,29 @@ class RuleDetailTests(unittest.TestCase):
         self.assertEqual([h["rule"] for h in hits], ["id_card"])
 
     def test_bank_card_lengths_16_to_19(self):
-        for length in (16, 17, 18, 19):
-            number = "".join(str((i * 7 + 3) % 10) for i in range(length))
-            # 18 位且末位不是 X 时仍是数字串，应按 bank_card 命中。
-            if any(h["rule"] == "id_card" for h in scan_sensitive_info(number)):
-                continue
+        # 均为校验位不成立的数字串：18 位也不能被当成身份证号而漏报 bank_card。
+        numbers = ("6222021234567890", "62220212345678901",
+                   "622202123456789012", "6222021234567890123")
+        for number in numbers:
+            self.assertIn(len(number), (16, 17, 18, 19))
             [hit] = scan_sensitive_info(f"卡号 {number}")
             self.assertEqual((hit["rule"], hit["text"]), ("bank_card", number))
+
+    def test_eighteen_digit_non_id_number_is_bank_card_not_id_card(self):
+        # 卡号 622202123456789012：长度 18，但 GB 11643 校验位不成立。
+        hits = scan_sensitive_info("卡号：622202123456789012")
+        self.assertEqual([h["rule"] for h in hits], ["bank_card"])
+
+    def test_id_card_with_failing_checksum_is_not_id_card(self):
+        # 110105194912310021：把校验位改成 1，校验不成立，不能报 id_card。
+        hits = scan_sensitive_info("号码：110105194912310021")
+        self.assertEqual([h["rule"] for h in hits], ["bank_card"])
+
+    def test_id_card_with_valid_checksum_is_only_id_card(self):
+        # 11010519491231002X 校验位成立：只报 id_card，不再重复报 bank_card。
+        for value in ("11010519491231002X", "11010519491231002x"):
+            hits = scan_sensitive_info(f"号码：{value}")
+            self.assertEqual([h["rule"] for h in hits], ["id_card"])
 
     def test_number_runs_outside_16_to_19_are_ignored(self):
         text = "编号 12345678901234，订单 123456789012345，流水 12345678901234567890"
