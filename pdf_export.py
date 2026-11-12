@@ -110,6 +110,7 @@ def render_pdf(markdown_text: str, density: str = "compact") -> bytes:
             return
         page = doc.new_page(width=595, height=842)
         _register(page)
+        cursor = margin  # 新页排版从页顶页边距重新开始，否则会每块文本各占一页
 
     def write(text: str, size: float, bold: bool = False, indent: float = 0.0,
               gap: float = 4.0, color: tuple[float, float, float] = (0.11, 0.13, 0.16)) -> None:
